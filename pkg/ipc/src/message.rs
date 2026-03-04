@@ -119,7 +119,8 @@ mod hex_bytes {
 
         let mut hex = String::with_capacity(bytes.len() * 2);
         for b in bytes {
-            write!(&mut hex, "{:02x}", b).unwrap();
+            write!(&mut hex, "{:02x}", b)
+                .map_err(serde::ser::Error::custom)?;
         }
         hex.serialize(s)
     }

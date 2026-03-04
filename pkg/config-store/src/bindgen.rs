@@ -1,43 +1,22 @@
 //! High-level deno_bindgen bindings for the config store.
 
 use deno_bindgen::deno_bindgen;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
+
+use marauder_event_bus::HandleRegistry;
 
 use crate::store::ConfigStore;
 
-static HANDLES: OnceLock<Mutex<HashMap<u32, Arc<RwLock<ConfigStore>>>>> = OnceLock::new();
-static NEXT_ID: OnceLock<Mutex<u32>> = OnceLock::new();
-
-fn handles() -> &'static Mutex<HashMap<u32, Arc<RwLock<ConfigStore>>>> {
-    HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn next_id() -> u32 {
-    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap_or_else(|e| e.into_inner());
-    let val = *id;
-    match val.checked_add(1) {
-        Some(next) => { *id = next; val }
-        None => {
-            tracing::error!("bindgen handle ID counter overflow");
-            0
-        }
-    }
-}
+static REGISTRY: HandleRegistry<Arc<RwLock<ConfigStore>>> = HandleRegistry::new();
 
 fn get_store(handle_id: u32) -> Option<Arc<RwLock<ConfigStore>>> {
-    handles().lock().unwrap_or_else(|e| e.into_inner()).get(&handle_id).cloned()
+    REGISTRY.get_clone(handle_id)
 }
 
-/// Create a new ConfigStore with defaults. Returns a handle ID.
+/// Create a new ConfigStore with defaults. Returns a handle ID (0 on failure).
 #[deno_bindgen]
 fn config_store_bindgen_create() -> u32 {
-    let id = next_id();
-    if id == 0 {
-        return 0; // overflow sentinel — caller must treat 0 as invalid
-    }
-    handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::new(RwLock::new(ConfigStore::new())));
-    id
+    REGISTRY.allocate(Arc::new(RwLock::new(ConfigStore::new())))
 }
 
 /// Load config from file paths. Pass empty string to skip a layer.
@@ -125,5 +104,5 @@ fn config_store_bindgen_reload(handle_id: u32) -> u8 {
 /// Destroy a ConfigStore handle.
 #[deno_bindgen]
 fn config_store_bindgen_destroy(handle_id: u32) {
-    handles().lock().unwrap_or_else(|e| e.into_inner()).remove(&handle_id);
+    REGISTRY.remove(handle_id);
 }

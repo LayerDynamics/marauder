@@ -38,10 +38,22 @@ pub fn default_socket_path() -> PathBuf {
 /// permissions (`0700`) suitable for a control socket.
 #[cfg(unix)]
 pub fn ensure_socket_dir_secure(socket_path: &Path) -> Result<(), DaemonError> {
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     if let Some(dir) = socket_path.parent() {
         fs::create_dir_all(dir)?;
-        let mut perms = fs::metadata(dir)?.permissions();
+        let meta = fs::metadata(dir)?;
+        // Verify the directory is owned by the current user
+        let my_uid = unsafe { libc::getuid() };
+        if meta.uid() != my_uid {
+            return Err(DaemonError::Other(format!(
+                "socket directory {} is owned by uid {} but current uid is {}",
+                dir.display(),
+                meta.uid(),
+                my_uid,
+            )));
+        }
+        let mut perms = meta.permissions();
         perms.set_mode(0o700);
         fs::set_permissions(dir, perms)?;
     }
