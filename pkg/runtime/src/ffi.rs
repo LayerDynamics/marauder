@@ -14,14 +14,7 @@ use std::sync::Mutex;
 
 use crate::config::RuntimeConfig;
 use crate::lifecycle::MarauderRuntime;
-
-/// Helper to lock a mutex, logging a warning if it was poisoned.
-fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuard<'a, T> {
-    mutex.lock().unwrap_or_else(|e| {
-        tracing::warn!("{label} mutex was poisoned, recovering");
-        e.into_inner()
-    })
-}
+use crate::util::lock_or_recover;
 
 /// Opaque FFI handle wrapping the runtime + a tokio runtime for async ops.
 pub struct RuntimeHandle {

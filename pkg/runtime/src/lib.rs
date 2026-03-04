@@ -5,6 +5,7 @@ pub mod lifecycle;
 pub mod pipeline;
 pub mod ffi;
 pub mod bindgen;
+pub mod util;
 
 pub use config::RuntimeConfig;
 pub use error::RuntimeError;

@@ -28,7 +28,7 @@ pub struct RuntimeConfig {
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell = resolve_default_shell();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self {
             shell,
@@ -42,6 +42,31 @@ impl Default for RuntimeConfig {
             watch_config: true,
         }
     }
+}
+
+/// Resolve the default shell, ensuring an absolute path.
+///
+/// If `$SHELL` is set and absolute, use it. If `$SHELL` is relative (e.g. "bash"),
+/// attempt to resolve it via `which`. Falls back to `/bin/sh` if resolution fails.
+fn resolve_default_shell() -> String {
+    if let Ok(shell) = std::env::var("SHELL") {
+        let path = std::path::Path::new(&shell);
+        if path.is_absolute() {
+            return shell;
+        }
+        // $SHELL is relative — try to resolve via PATH lookup
+        if let Ok(output) = std::process::Command::new("which").arg(&shell).output() {
+            if output.status.success() {
+                if let Ok(resolved) = String::from_utf8(output.stdout) {
+                    let resolved = resolved.trim().to_string();
+                    if !resolved.is_empty() {
+                        return resolved;
+                    }
+                }
+            }
+        }
+    }
+    "/bin/sh".into()
 }
 
 /// Default user config path, respecting XDG_CONFIG_HOME.

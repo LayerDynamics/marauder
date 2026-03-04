@@ -24,30 +24,7 @@ use crate::config::RuntimeConfig;
 use crate::error::RuntimeError;
 use crate::hooks::{self, LifecycleEvent, LifecycleReceiver, SharedLifecycleHooks};
 use crate::pipeline::PanePipeline;
-
-/// Helper to lock a std::sync::Mutex, logging a warning if it was poisoned.
-fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuard<'a, T> {
-    mutex.lock().unwrap_or_else(|e| {
-        tracing::warn!("{label} mutex was poisoned, recovering");
-        e.into_inner()
-    })
-}
-
-/// Helper to read-lock a RwLock, logging a warning if it was poisoned.
-fn read_or_recover<'a, T>(lock: &'a RwLock<T>, label: &str) -> std::sync::RwLockReadGuard<'a, T> {
-    lock.read().unwrap_or_else(|e| {
-        tracing::warn!("{label} RwLock was poisoned (read), recovering");
-        e.into_inner()
-    })
-}
-
-/// Helper to write-lock a RwLock, logging a warning if it was poisoned.
-fn write_or_recover<'a, T>(lock: &'a RwLock<T>, label: &str) -> std::sync::RwLockWriteGuard<'a, T> {
-    lock.write().unwrap_or_else(|e| {
-        tracing::warn!("{label} RwLock was poisoned (write), recovering");
-        e.into_inner()
-    })
-}
+use crate::util::{lock_or_recover, read_or_recover, write_or_recover};
 
 /// Runtime state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,13 +371,16 @@ impl MarauderRuntime {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = std::fs::metadata(path) {
-                let mode = metadata.permissions().mode();
-                if mode & 0o111 == 0 {
-                    return Err(RuntimeError::InvalidShell(format!(
-                        "shell is not executable: {shell}"
-                    )));
-                }
+            let metadata = std::fs::metadata(path).map_err(|e| {
+                RuntimeError::InvalidShell(format!(
+                    "cannot read shell metadata for {shell}: {e}"
+                ))
+            })?;
+            let mode = metadata.permissions().mode();
+            if mode & 0o111 == 0 {
+                return Err(RuntimeError::InvalidShell(format!(
+                    "shell is not executable: {shell}"
+                )));
             }
         }
 

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::config::RuntimeConfig;
 use crate::lifecycle::MarauderRuntime;
+use crate::util::lock_or_recover;
 
 struct RuntimeEntry {
     runtime: Arc<Mutex<MarauderRuntime>>,
@@ -46,14 +47,6 @@ fn get_entry(handle_id: u32) -> Option<(Arc<Mutex<MarauderRuntime>>, Arc<tokio::
         .unwrap()
         .get(&handle_id)
         .map(|e| (Arc::clone(&e.runtime), Arc::clone(&e.tokio_rt)))
-}
-
-/// Helper to lock a mutex with poison recovery and logging.
-fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuard<'a, T> {
-    mutex.lock().unwrap_or_else(|e| {
-        tracing::warn!("{label} mutex was poisoned, recovering");
-        e.into_inner()
-    })
 }
 
 /// Create a new runtime with default config. Returns a handle ID, or 0 on error.

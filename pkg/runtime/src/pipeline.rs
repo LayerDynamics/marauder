@@ -13,13 +13,7 @@ use marauder_parser::MarauderParser;
 use marauder_pty::{PaneId, PtyReader};
 use tokio::sync::broadcast;
 
-/// Helper to lock a mutex, logging a warning if it was poisoned.
-fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuard<'a, T> {
-    mutex.lock().unwrap_or_else(|e| {
-        tracing::warn!("{label} mutex was poisoned, recovering");
-        e.into_inner()
-    })
-}
+use crate::util::lock_or_recover;
 
 /// A single pane's pipeline: PTY reader → parser → grid.
 pub struct PanePipeline {
@@ -111,18 +105,23 @@ impl PanePipeline {
         source_label: &str,
     ) {
         // Lock parser and grid, apply actions, then release before publish
-        {
+        let grid_changed = {
             let mut parser = lock_or_recover(parser, "parser");
             let mut grid = lock_or_recover(grid, "grid");
+            let mut changed = false;
             parser.feed(data, |action| {
                 grid.apply_action(&action);
+                changed = true;
             });
+            changed
+        };
+        // Only publish if the parser actually produced actions
+        if grid_changed {
+            event_bus.publish(
+                Event::new(EventType::GridUpdated, pane_id)
+                    .with_source(source_label.to_owned()),
+            );
         }
-        // Locks released — safe to publish without blocking pipeline on subscribers
-        event_bus.publish(
-            Event::new(EventType::GridUpdated, pane_id)
-                .with_source(source_label.to_owned()),
-        );
     }
 
     /// Resize this pane's grid.
@@ -146,28 +145,6 @@ impl PanePipeline {
 mod tests {
     use super::*;
     use marauder_event_bus::bus;
-
-    #[test]
-    fn test_lock_or_recover_normal() {
-        let m = Mutex::new(42);
-        let guard = lock_or_recover(&m, "test");
-        assert_eq!(*guard, 42);
-    }
-
-    #[test]
-    fn test_lock_or_recover_poisoned() {
-        let m = Arc::new(Mutex::new(42));
-        let m2 = Arc::clone(&m);
-        // Poison the mutex by panicking while holding the lock
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut guard = m2.lock().unwrap();
-            *guard = 99;
-            panic!("intentional");
-        }));
-        // Should recover the value
-        let guard = lock_or_recover(&m, "test");
-        assert_eq!(*guard, 99);
-    }
 
     #[tokio::test]
     async fn test_pipeline_spawn_and_resize() {
