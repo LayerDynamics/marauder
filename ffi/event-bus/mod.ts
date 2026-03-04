@@ -220,10 +220,12 @@ export class EventBus {
       normalizedId,
     );
 
-    const sub = this.#subscriptions.get(subscriberId);
+    // Normalize lookup — Deno FFI may return number or bigint for u64
+    const sub = this.#subscriptions.get(subscriberId)
+      ?? this.#subscriptions.get(typeof subscriberId === "number" ? BigInt(subscriberId) : Number(subscriberId));
     if (sub) {
       sub.ffiCallback.close();
-      this.#subscriptions.delete(subscriberId);
+      this.#subscriptions.delete(sub.subscriberId);
     }
   }
 

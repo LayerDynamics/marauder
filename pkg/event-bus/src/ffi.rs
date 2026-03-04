@@ -58,7 +58,7 @@ pub unsafe extern "C" fn event_bus_subscribe(
         }
     });
 
-    id.0
+    id.as_u64()
 }
 
 /// Unsubscribe a previously registered callback.
@@ -83,7 +83,7 @@ pub unsafe extern "C" fn event_bus_unsubscribe(
         Err(_) => return 0,
     };
 
-    handle.bus.unsubscribe(event_type, SubscriberId(subscriber_id));
+    handle.bus.unsubscribe(event_type, SubscriberId::from_raw(subscriber_id));
     1
 }
 

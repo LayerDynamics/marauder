@@ -29,11 +29,13 @@ pub extern "C" fn pty_manager_create() -> *mut PtyManagerHandle {
 /// - `handle` must be a valid pointer from `pty_manager_create`.
 /// - `shell` must be a valid null-terminated C string, or null for default.
 /// - `cwd` must be a valid null-terminated C string, or null for default.
+/// - `env_json` must be a valid null-terminated JSON string of `{"key":"value",...}`, or null for empty.
 #[no_mangle]
 pub unsafe extern "C" fn pty_create(
     handle: *mut PtyManagerHandle,
     shell: *const c_char,
     cwd: *const c_char,
+    env_json: *const c_char,
     rows: u16,
     cols: u16,
 ) -> u64 {
@@ -66,9 +68,21 @@ pub unsafe extern "C" fn pty_create(
         )
     };
 
+    let env = if env_json.is_null() {
+        HashMap::new()
+    } else {
+        let json_str = unsafe { CStr::from_ptr(env_json) }
+            .to_str()
+            .unwrap_or("{}");
+        serde_json::from_str::<HashMap<String, String>>(json_str).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to parse env_json, using empty env");
+            HashMap::new()
+        })
+    };
+
     let config = PtyConfig {
         shell,
-        env: HashMap::new(),
+        env,
         cwd,
         rows,
         cols,
