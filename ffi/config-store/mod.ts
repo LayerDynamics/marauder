@@ -4,45 +4,10 @@
  * Wraps the C ABI exported by `libmarauder_config_store` in an ergonomic TypeScript class.
  */
 
-/** Resolve the path to the compiled config-store shared library. */
-function resolveLibPath(): string {
-  const libName = (() => {
-    switch (Deno.build.os) {
-      case "darwin":
-        return "libmarauder_config_store.dylib";
-      case "linux":
-        return "libmarauder_config_store.so";
-      case "windows":
-        return "marauder_config_store.dll";
-      default:
-        throw new Error(`Unsupported platform: ${Deno.build.os}`);
-    }
-  })();
-
-  const envDir = Deno.env.get("MARAUDER_LIB_DIR");
-  if (envDir) {
-    return `${envDir}/${libName}`;
-  }
-
-  const candidates = [
-    `target/release/${libName}`,
-    `target/debug/${libName}`,
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      Deno.statSync(candidate);
-      return candidate;
-    } catch {
-      // continue
-    }
-  }
-
-  return `target/debug/${libName}`;
-}
+import { bufferPtr, resolveLibPath, toCString } from "../_lib.ts";
 
 const lib = Deno.dlopen(
-  resolveLibPath(),
+  resolveLibPath("marauder_config_store"),
   {
     config_store_create: {
       parameters: [],
@@ -79,17 +44,10 @@ const lib = Deno.dlopen(
   } as const,
 );
 
-const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** Encode a string as a null-terminated C string in a Uint8Array. */
-function toCString(s: string): Uint8Array {
-  const bytes = encoder.encode(s);
-  const buf = new Uint8Array(bytes.length + 1);
-  buf.set(bytes);
-  buf[bytes.length] = 0;
-  return buf;
-}
+/** Maximum buffer size for config value reads (1 MB). */
+const MAX_CONFIG_VALUE_SIZE = 1024 * 1024;
 
 /** Config file paths for loading layered configuration. */
 export interface ConfigPaths {
@@ -135,15 +93,9 @@ export class ConfigStore {
     const userBuf = paths.user ? toCString(paths.user) : null;
     const projectBuf = paths.project ? toCString(paths.project) : null;
 
-    const systemPtr = systemBuf
-      ? Deno.UnsafePointer.of(systemBuf as unknown as ArrayBuffer)
-      : null;
-    const userPtr = userBuf
-      ? Deno.UnsafePointer.of(userBuf as unknown as ArrayBuffer)
-      : null;
-    const projectPtr = projectBuf
-      ? Deno.UnsafePointer.of(projectBuf as unknown as ArrayBuffer)
-      : null;
+    const systemPtr = systemBuf ? bufferPtr(systemBuf) : null;
+    const userPtr = userBuf ? bufferPtr(userBuf) : null;
+    const projectPtr = projectBuf ? bufferPtr(projectBuf) : null;
 
     const result = lib.symbols.config_store_load(
       this.#handle,
@@ -160,29 +112,41 @@ export class ConfigStore {
   /**
    * Get a config value by dot-notation key (e.g. "font.size").
    * Returns the parsed JSON value, or undefined if not found.
+   *
+   * Automatically retries with a larger buffer if the value was truncated.
    */
   get<T = unknown>(key: string): T | undefined {
     this.#ensureOpen();
 
     const keyBuf = toCString(key);
-    const keyPtr = Deno.UnsafePointer.of(keyBuf as unknown as ArrayBuffer);
-    const bufSize = 4096;
-    const outBuf = new Uint8Array(bufSize);
-    const outPtr = Deno.UnsafePointer.of(outBuf as unknown as ArrayBuffer);
+    const keyPtr = bufferPtr(keyBuf);
+    let bufSize = 4096;
 
-    const totalLen = lib.symbols.config_store_get(
-      this.#handle,
-      keyPtr,
-      outPtr,
-      BigInt(bufSize),
+    // Retry loop: if the value is larger than our buffer, grow and retry
+    while (bufSize <= MAX_CONFIG_VALUE_SIZE) {
+      const outBuf = new Uint8Array(bufSize);
+
+      const totalLen = lib.symbols.config_store_get(
+        this.#handle,
+        keyPtr,
+        bufferPtr(outBuf),
+        BigInt(bufSize),
+      );
+
+      if (totalLen < 0) return undefined;
+
+      if (totalLen <= bufSize) {
+        const json = decoder.decode(outBuf.subarray(0, totalLen));
+        return JSON.parse(json) as T;
+      }
+
+      // Value was truncated — retry with the exact needed size
+      bufSize = totalLen;
+    }
+
+    throw new Error(
+      `Config value for "${key}" exceeds maximum size (${MAX_CONFIG_VALUE_SIZE} bytes)`,
     );
-
-    if (totalLen < 0) return undefined;
-
-    // If truncated, we'd need a larger buffer — for now return what we have
-    const readLen = Math.min(totalLen, bufSize);
-    const json = decoder.decode(outBuf.subarray(0, readLen));
-    return JSON.parse(json) as T;
   }
 
   /**
@@ -194,13 +158,11 @@ export class ConfigStore {
 
     const keyBuf = toCString(key);
     const valueBuf = toCString(JSON.stringify(value));
-    const keyPtr = Deno.UnsafePointer.of(keyBuf as unknown as ArrayBuffer);
-    const valuePtr = Deno.UnsafePointer.of(valueBuf as unknown as ArrayBuffer);
 
     const result = lib.symbols.config_store_set(
       this.#handle,
-      keyPtr,
-      valuePtr,
+      bufferPtr(keyBuf),
+      bufferPtr(valueBuf),
     );
 
     if (result !== 0) {
@@ -215,9 +177,11 @@ export class ConfigStore {
     this.#ensureOpen();
 
     const pathBuf = toCString(path);
-    const pathPtr = Deno.UnsafePointer.of(pathBuf as unknown as ArrayBuffer);
 
-    const result = lib.symbols.config_store_save(this.#handle, pathPtr);
+    const result = lib.symbols.config_store_save(
+      this.#handle,
+      bufferPtr(pathBuf),
+    );
 
     if (result !== 0) {
       throw new Error(`Failed to save config to "${path}"`);

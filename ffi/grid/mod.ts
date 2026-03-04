@@ -4,45 +4,10 @@
  * Wraps the C ABI exported by `libmarauder_grid` in an ergonomic TypeScript class.
  */
 
-/** Resolve the path to the compiled grid shared library. */
-function resolveLibPath(): string {
-  const libName = (() => {
-    switch (Deno.build.os) {
-      case "darwin":
-        return "libmarauder_grid.dylib";
-      case "linux":
-        return "libmarauder_grid.so";
-      case "windows":
-        return "marauder_grid.dll";
-      default:
-        throw new Error(`Unsupported platform: ${Deno.build.os}`);
-    }
-  })();
-
-  const envDir = Deno.env.get("MARAUDER_LIB_DIR");
-  if (envDir) {
-    return `${envDir}/${libName}`;
-  }
-
-  const candidates = [
-    `target/release/${libName}`,
-    `target/debug/${libName}`,
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      Deno.statSync(candidate);
-      return candidate;
-    } catch {
-      // continue
-    }
-  }
-
-  return `target/debug/${libName}`;
-}
+import { bufferPtr, resolveLibPath } from "../_lib.ts";
 
 const lib = Deno.dlopen(
-  resolveLibPath(),
+  resolveLibPath("marauder_grid"),
   {
     grid_create: {
       parameters: ["u16", "u16"],
@@ -138,11 +103,10 @@ export class Grid {
     this.#ensureOpen();
 
     const jsonBytes = encoder.encode(JSON.stringify(action));
-    const jsonPtr = Deno.UnsafePointer.of(jsonBytes as unknown as ArrayBuffer);
 
     const result = lib.symbols.grid_apply_action(
       this.#handle,
-      jsonPtr,
+      bufferPtr(jsonBytes),
       BigInt(jsonBytes.byteLength),
     );
 
@@ -158,19 +122,20 @@ export class Grid {
 
     const bufSize = 1024;
     const buf = new Uint8Array(bufSize);
-    const bufPtr = Deno.UnsafePointer.of(buf as unknown as ArrayBuffer);
 
-    const written = lib.symbols.grid_get_cell(
-      this.#handle,
-      BigInt(row),
-      BigInt(col),
-      bufPtr,
-      BigInt(bufSize),
+    const written = Number(
+      lib.symbols.grid_get_cell(
+        this.#handle,
+        BigInt(row),
+        BigInt(col),
+        bufferPtr(buf),
+        BigInt(bufSize),
+      ),
     );
 
-    if (written === 0n) return null;
+    if (written === 0) return null;
 
-    const json = decoder.decode(buf.subarray(0, Number(written)));
+    const json = decoder.decode(buf.subarray(0, written));
     return JSON.parse(json) as Cell;
   }
 
@@ -240,16 +205,17 @@ export class Grid {
 
     const bufSize = 65536;
     const buf = new Uint8Array(bufSize);
-    const bufPtr = Deno.UnsafePointer.of(buf as unknown as ArrayBuffer);
 
-    const written = lib.symbols.grid_get_selection_text(
-      this.#handle,
-      bufPtr,
-      BigInt(bufSize),
+    const written = Number(
+      lib.symbols.grid_get_selection_text(
+        this.#handle,
+        bufferPtr(buf),
+        BigInt(bufSize),
+      ),
     );
 
-    if (written === 0n) return null;
-    return decoder.decode(buf.subarray(0, Number(written)));
+    if (written === 0) return null;
+    return decoder.decode(buf.subarray(0, written));
   }
 
   /**
@@ -260,16 +226,17 @@ export class Grid {
 
     const maxRows = 1024;
     const buf = new Uint32Array(maxRows);
-    const bufPtr = Deno.UnsafePointer.of(buf as unknown as ArrayBuffer);
 
-    const count = lib.symbols.grid_get_dirty_rows(
-      this.#handle,
-      bufPtr,
-      BigInt(maxRows),
+    const count = Number(
+      lib.symbols.grid_get_dirty_rows(
+        this.#handle,
+        bufferPtr(buf),
+        BigInt(maxRows),
+      ),
     );
 
     const rows: number[] = [];
-    for (let i = 0; i < Number(count); i++) {
+    for (let i = 0; i < count; i++) {
       rows.push(buf[i]!);
     }
     return rows;

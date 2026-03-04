@@ -4,45 +4,10 @@
  * Wraps the C ABI exported by `libmarauder_pty` in an ergonomic TypeScript class.
  */
 
-/** Resolve the path to the compiled PTY shared library. */
-function resolveLibPath(): string {
-  const libName = (() => {
-    switch (Deno.build.os) {
-      case "darwin":
-        return "libmarauder_pty.dylib";
-      case "linux":
-        return "libmarauder_pty.so";
-      case "windows":
-        return "marauder_pty.dll";
-      default:
-        throw new Error(`Unsupported platform: ${Deno.build.os}`);
-    }
-  })();
-
-  const envDir = Deno.env.get("MARAUDER_LIB_DIR");
-  if (envDir) {
-    return `${envDir}/${libName}`;
-  }
-
-  const candidates = [
-    `target/release/${libName}`,
-    `target/debug/${libName}`,
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      Deno.statSync(candidate);
-      return candidate;
-    } catch {
-      // continue
-    }
-  }
-
-  return `target/debug/${libName}`;
-}
+import { bufferPtr, resolveLibPath, toCString } from "../_lib.ts";
 
 const lib = Deno.dlopen(
-  resolveLibPath(),
+  resolveLibPath("marauder_pty"),
   {
     pty_manager_create: {
       parameters: [],
@@ -88,15 +53,6 @@ const lib = Deno.dlopen(
 );
 
 const encoder = new TextEncoder();
-
-/** Encode a string as a null-terminated C string in a Uint8Array. */
-function toCString(s: string): Uint8Array {
-  const bytes = encoder.encode(s);
-  const buf = new Uint8Array(bytes.length + 1);
-  buf.set(bytes);
-  buf[bytes.length] = 0;
-  return buf;
-}
 
 /** Configuration for creating a PTY session. */
 export interface PtyConfig {
@@ -146,15 +102,9 @@ export class PtyManager {
     const cwdBuf = config.cwd ? toCString(config.cwd) : null;
     const envBuf = config.env ? toCString(JSON.stringify(config.env)) : null;
 
-    const shellPtr = shellBuf
-      ? Deno.UnsafePointer.of(shellBuf as unknown as ArrayBuffer)
-      : null;
-    const cwdPtr = cwdBuf
-      ? Deno.UnsafePointer.of(cwdBuf as unknown as ArrayBuffer)
-      : null;
-    const envPtr = envBuf
-      ? Deno.UnsafePointer.of(envBuf as unknown as ArrayBuffer)
-      : null;
+    const shellPtr = shellBuf ? bufferPtr(shellBuf) : null;
+    const cwdPtr = cwdBuf ? bufferPtr(cwdBuf) : null;
+    const envPtr = envBuf ? bufferPtr(envBuf) : null;
 
     const paneId = lib.symbols.pty_create(
       this.#handle,
@@ -180,17 +130,16 @@ export class PtyManager {
     this.#ensureOpen();
 
     const buf = new Uint8Array(maxBytes);
-    const bufPtr = Deno.UnsafePointer.of(buf as unknown as ArrayBuffer);
     const normalizedId = typeof paneId === "number" ? BigInt(paneId) : paneId;
 
     const bytesRead = lib.symbols.pty_read(
       this.#handle,
       normalizedId,
-      bufPtr,
+      bufferPtr(buf),
       BigInt(maxBytes),
     );
 
-    if (bytesRead < 0 || bytesRead < 0n) {
+    if (bytesRead < 0n) {
       throw new Error(`Failed to read from PTY pane ${paneId}`);
     }
 
@@ -204,17 +153,16 @@ export class PtyManager {
     this.#ensureOpen();
 
     const bytes = typeof data === "string" ? encoder.encode(data) : data;
-    const dataPtr = Deno.UnsafePointer.of(bytes as unknown as ArrayBuffer);
     const normalizedId = typeof paneId === "number" ? BigInt(paneId) : paneId;
 
     const written = lib.symbols.pty_write(
       this.#handle,
       normalizedId,
-      dataPtr,
+      bufferPtr(bytes),
       BigInt(bytes.byteLength),
     );
 
-    if (written < 0 || written < 0n) {
+    if (written < 0n) {
       throw new Error(`Failed to write to PTY pane ${paneId}`);
     }
 

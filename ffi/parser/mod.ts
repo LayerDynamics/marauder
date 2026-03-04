@@ -4,45 +4,10 @@
  * Wraps the C ABI exported by `libmarauder_parser` in an ergonomic TypeScript class.
  */
 
-/** Resolve the path to the compiled parser shared library. */
-function resolveLibPath(): string {
-  const libName = (() => {
-    switch (Deno.build.os) {
-      case "darwin":
-        return "libmarauder_parser.dylib";
-      case "linux":
-        return "libmarauder_parser.so";
-      case "windows":
-        return "marauder_parser.dll";
-      default:
-        throw new Error(`Unsupported platform: ${Deno.build.os}`);
-    }
-  })();
-
-  const envDir = Deno.env.get("MARAUDER_LIB_DIR");
-  if (envDir) {
-    return `${envDir}/${libName}`;
-  }
-
-  const candidates = [
-    `target/release/${libName}`,
-    `target/debug/${libName}`,
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      Deno.statSync(candidate);
-      return candidate;
-    } catch {
-      // continue
-    }
-  }
-
-  return `target/debug/${libName}`;
-}
+import { bufferPtr, resolveLibPath } from "../_lib.ts";
 
 const lib = Deno.dlopen(
-  resolveLibPath(),
+  resolveLibPath("marauder_parser"),
   {
     parser_create: {
       parameters: [],
@@ -75,6 +40,47 @@ export interface TerminalAction {
 /** Callback type for receiving parsed actions. */
 export type ActionCallback = (action: TerminalAction) => void;
 
+/** FFI callback definition for parser action handlers. */
+const ACTION_CALLBACK_DEF = {
+  parameters: ["pointer", "usize", "pointer"],
+  result: "void",
+} as const;
+
+/**
+ * Create an UnsafeCallback that decodes JSON action payloads from the Rust parser
+ * and forwards them to the given handler. Caller must call `.close()` on the returned
+ * callback when done.
+ */
+function createActionCallback(
+  handler: ActionCallback,
+): Deno.UnsafeCallback<typeof ACTION_CALLBACK_DEF> {
+  return new Deno.UnsafeCallback(
+    ACTION_CALLBACK_DEF,
+    (
+      actionJsonPtr: Deno.PointerValue,
+      actionJsonLen: number | bigint,
+      _userData: Deno.PointerValue,
+    ) => {
+      const len = Number(actionJsonLen);
+      if (len === 0 || actionJsonPtr === null) return;
+
+      const view = new Deno.UnsafePointerView(actionJsonPtr);
+      const jsonBytes = new Uint8Array(len);
+      view.copyInto(jsonBytes);
+
+      try {
+        const parsed = JSON.parse(
+          decoder.decode(jsonBytes),
+        ) as TerminalAction;
+        handler(parsed);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[Parser] Failed to parse action JSON: ${msg}`);
+      }
+    },
+  );
+}
+
 /**
  * TypeScript wrapper around the marauder VT parser.
  *
@@ -104,42 +110,14 @@ export class Parser {
     this.#ensureOpen();
 
     const bytes = typeof input === "string" ? encoder.encode(input) : input;
-    const inputPtr = Deno.UnsafePointer.of(bytes as unknown as ArrayBuffer);
     const actions: TerminalAction[] = [];
 
-    const callback = new Deno.UnsafeCallback(
-      {
-        parameters: ["pointer", "usize", "pointer"],
-        result: "void",
-      } as const,
-      (
-        actionJsonPtr: Deno.PointerValue,
-        actionJsonLen: number | bigint,
-        _userData: Deno.PointerValue,
-      ) => {
-        const len = Number(actionJsonLen);
-        if (len === 0 || actionJsonPtr === null) return;
-
-        const view = new Deno.UnsafePointerView(actionJsonPtr);
-        const jsonBytes = new Uint8Array(len);
-        view.copyInto(jsonBytes);
-
-        try {
-          const parsed = JSON.parse(
-            decoder.decode(jsonBytes),
-          ) as TerminalAction;
-          actions.push(parsed);
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[Parser] Failed to parse action JSON: ${msg}`);
-        }
-      },
-    );
+    const callback = createActionCallback((action) => actions.push(action));
 
     try {
       lib.symbols.parser_feed(
         this.#handle,
-        inputPtr,
+        bufferPtr(bytes),
         BigInt(bytes.byteLength),
         callback.pointer,
         null,
@@ -159,41 +137,13 @@ export class Parser {
     this.#ensureOpen();
 
     const bytes = typeof input === "string" ? encoder.encode(input) : input;
-    const inputPtr = Deno.UnsafePointer.of(bytes as unknown as ArrayBuffer);
 
-    const callback = new Deno.UnsafeCallback(
-      {
-        parameters: ["pointer", "usize", "pointer"],
-        result: "void",
-      } as const,
-      (
-        actionJsonPtr: Deno.PointerValue,
-        actionJsonLen: number | bigint,
-        _userData: Deno.PointerValue,
-      ) => {
-        const len = Number(actionJsonLen);
-        if (len === 0 || actionJsonPtr === null) return;
-
-        const view = new Deno.UnsafePointerView(actionJsonPtr);
-        const jsonBytes = new Uint8Array(len);
-        view.copyInto(jsonBytes);
-
-        try {
-          const parsed = JSON.parse(
-            decoder.decode(jsonBytes),
-          ) as TerminalAction;
-          onAction(parsed);
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[Parser] Failed to parse action JSON: ${msg}`);
-        }
-      },
-    );
+    const callback = createActionCallback(onAction);
 
     try {
       lib.symbols.parser_feed(
         this.#handle,
-        inputPtr,
+        bufferPtr(bytes),
         BigInt(bytes.byteLength),
         callback.pointer,
         null,
