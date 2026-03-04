@@ -1,41 +1,23 @@
 //! High-level deno_bindgen bindings for the terminal grid.
 
 use deno_bindgen::deno_bindgen;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+
+use marauder_event_bus::HandleRegistry;
 
 use crate::grid::Grid;
 use marauder_parser::TerminalAction;
 
-static HANDLES: OnceLock<Mutex<HashMap<u32, Arc<Mutex<Grid>>>>> = OnceLock::new();
-static NEXT_ID: OnceLock<Mutex<u32>> = OnceLock::new();
-
-fn handles() -> &'static Mutex<HashMap<u32, Arc<Mutex<Grid>>>> {
-    HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn next_id() -> u32 {
-    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap_or_else(|e| e.into_inner());
-    let val = *id;
-    match val.checked_add(1) {
-        Some(next) => { *id = next; val }
-        None => {
-            tracing::error!("bindgen handle ID counter overflow");
-            0
-        }
-    }
-}
+static REGISTRY: HandleRegistry<Arc<Mutex<Grid>>> = HandleRegistry::new();
 
 fn get_grid(handle_id: u32) -> Option<Arc<Mutex<Grid>>> {
-    handles().lock().unwrap_or_else(|e| e.into_inner()).get(&handle_id).cloned()
+    REGISTRY.get_clone(handle_id)
 }
 
-/// Create a new grid. Returns a handle ID.
+/// Create a new grid. Returns a handle ID (0 on failure).
 #[deno_bindgen]
 fn grid_bindgen_create(rows: u32, cols: u32) -> u32 {
-    let id = next_id();
-    handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::new(Mutex::new(Grid::new(rows as usize, cols as usize))));
-    id
+    REGISTRY.allocate(Arc::new(Mutex::new(Grid::new(rows as usize, cols as usize))))
 }
 
 /// Apply a terminal action (JSON string). Returns 1 on success, 0 on error.
@@ -124,5 +106,5 @@ fn grid_bindgen_select(handle_id: u32, start_row: u32, start_col: u32, end_row: 
 /// Destroy a grid handle.
 #[deno_bindgen]
 fn grid_bindgen_destroy(handle_id: u32) {
-    handles().lock().unwrap_or_else(|e| e.into_inner()).remove(&handle_id);
+    REGISTRY.remove(handle_id);
 }

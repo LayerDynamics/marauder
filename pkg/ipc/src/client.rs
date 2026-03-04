@@ -21,11 +21,15 @@ impl IpcClient {
     /// Connect to a daemon's Unix socket.
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self, IpcError> {
         let path = socket_path.as_ref();
-        if !path.exists() {
-            return Err(IpcError::ServerNotRunning);
-        }
 
-        let stream = UnixStream::connect(path).await?;
+        let stream = UnixStream::connect(path).await.map_err(|err| {
+            match err.kind() {
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                    IpcError::ServerNotRunning
+                }
+                _ => IpcError::from(err),
+            }
+        })?;
         let (read_half, write_half) = stream.into_split();
 
         Ok(Self {
@@ -53,9 +57,7 @@ impl IpcClient {
                 }
                 match response.payload {
                     IpcPayload::Response(resp) => Ok(resp),
-                    IpcPayload::Request(_) => Ok(IpcResponse::Error {
-                        message: "unexpected request from server".into(),
-                    }),
+                    IpcPayload::Request(_) => Err(IpcError::ProtocolViolation),
                 }
             }
             None => Err(IpcError::ConnectionClosed),

@@ -3,40 +3,23 @@
 use deno_bindgen::deno_bindgen;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+
+use marauder_event_bus::HandleRegistry;
 
 use crate::manager::{PtyConfig, PtyManager};
 use crate::pty;
 
-static HANDLES: OnceLock<Mutex<HashMap<u32, Arc<Mutex<PtyManager>>>>> = OnceLock::new();
-static NEXT_ID: OnceLock<Mutex<u32>> = OnceLock::new();
-
-fn handles() -> &'static Mutex<HashMap<u32, Arc<Mutex<PtyManager>>>> {
-    HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn next_id() -> u32 {
-    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap_or_else(|e| e.into_inner());
-    let val = *id;
-    match val.checked_add(1) {
-        Some(next) => { *id = next; val }
-        None => {
-            tracing::error!("bindgen handle ID counter overflow");
-            0
-        }
-    }
-}
+static REGISTRY: HandleRegistry<Arc<Mutex<PtyManager>>> = HandleRegistry::new();
 
 fn get_mgr(handle_id: u32) -> Option<Arc<Mutex<PtyManager>>> {
-    handles().lock().unwrap_or_else(|e| e.into_inner()).get(&handle_id).cloned()
+    REGISTRY.get_clone(handle_id)
 }
 
-/// Create a new PtyManager. Returns a handle ID.
+/// Create a new PtyManager. Returns a handle ID (0 on failure).
 #[deno_bindgen]
 fn pty_bindgen_create() -> u32 {
-    let id = next_id();
-    handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::new(Mutex::new(PtyManager::new())));
-    id
+    REGISTRY.allocate(Arc::new(Mutex::new(PtyManager::new())))
 }
 
 /// Create a PTY session. Returns pane ID (>0) on success, 0 on error.
@@ -111,5 +94,5 @@ fn pty_bindgen_get_pid(handle_id: u32, pane_id: u64) -> u32 {
 /// Destroy a PtyManager handle.
 #[deno_bindgen]
 fn pty_bindgen_destroy(handle_id: u32) {
-    handles().lock().unwrap_or_else(|e| e.into_inner()).remove(&handle_id);
+    REGISTRY.remove(handle_id);
 }

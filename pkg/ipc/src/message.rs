@@ -115,7 +115,13 @@ mod hex_bytes {
 
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::Serialize;
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        use std::fmt::Write as _;
+
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            write!(&mut hex, "{:02x}", b)
+                .map_err(serde::ser::Error::custom)?;
+        }
         hex.serialize(s)
     }
 
