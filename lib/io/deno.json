@@ -1,1 +1,5 @@
-{"name": "@marauder/io", "version": "0.1.0"}
+{
+  "name": "@marauder/io",
+  "version": "0.1.0",
+  "exports": { ".": "./mod.ts", "./pipeline.ts": "./pipeline.ts" }
+}
