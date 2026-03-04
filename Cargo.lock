@@ -2796,6 +2796,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]
@@ -2914,6 +2915,7 @@ dependencies = [
 name = "marauder-renderer"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "cosmic-text",
  "marauder-event-bus",
  "marauder-grid",

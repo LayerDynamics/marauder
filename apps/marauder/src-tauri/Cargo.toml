@@ -13,7 +13,7 @@ crate-type = ["rlib"]
 tauri-build = { workspace = true }
 
 [dependencies]
-tauri = { workspace = true }
+tauri = { workspace = true, features = ["macos-private-api"] }
 tauri-plugin-opener = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -29,3 +29,4 @@ marauder-renderer = { path = "../../../pkg/renderer" }
 marauder-compute = { path = "../../../pkg/compute" }
 marauder-runtime = { path = "../../../pkg/runtime" }
 marauder-config-store = { path = "../../../pkg/config-store" }
+wgpu = { workspace = true }
