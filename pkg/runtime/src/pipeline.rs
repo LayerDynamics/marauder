@@ -75,7 +75,12 @@ impl PanePipeline {
                         break;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(pane_id, skipped = n, "Pipeline receiver lagged");
+                        tracing::warn!(pane_id, skipped = n, "Pipeline receiver lagged — {n} chunks lost");
+                        // Notify consumers that output was lost so they can request a full redraw
+                        bus_clone.publish(
+                            Event::new(EventType::GridUpdated, pane_id)
+                                .with_source(source_clone.clone()),
+                        );
                     }
                 }
             }
@@ -119,6 +124,8 @@ impl PanePipeline {
         if grid_changed {
             event_bus.publish(
                 Event::new(EventType::GridUpdated, pane_id)
+                    // Note: source_label.to_owned() allocates per-chunk, but the string is
+                    // short (<20 bytes) and this is bounded by PTY output rate, not CPU-bound.
                     .with_source(source_label.to_owned()),
             );
         }

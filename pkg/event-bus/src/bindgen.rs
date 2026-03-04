@@ -21,10 +21,15 @@ fn handles() -> &'static Mutex<HandleMap> {
 }
 
 fn next_id() -> u32 {
-    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap();
+    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap_or_else(|e| e.into_inner());
     let val = *id;
-    *id += 1;
-    val
+    match val.checked_add(1) {
+        Some(next) => { *id = next; val }
+        None => {
+            tracing::error!("bindgen handle ID counter overflow");
+            0
+        }
+    }
 }
 
 /// Create a new EventBus. Returns a handle ID.
@@ -32,18 +37,20 @@ fn next_id() -> u32 {
 fn event_bus_bindgen_create() -> u32 {
     let bus = Arc::new(EventBus::new());
     let id = next_id();
-    handles().lock().unwrap().insert(id, bus);
+    handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, bus);
     id
 }
 
 /// Publish an event. Returns true on success.
 #[deno_bindgen]
 fn event_bus_bindgen_publish(handle_id: u32, event_type: u32, payload_json: &str) -> u8 {
-    let map = handles().lock().unwrap();
-    let bus = match map.get(&handle_id) {
-        Some(b) => b,
-        None => return 0,
-    };
+    let bus = {
+        let map = handles().lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(&handle_id) {
+            Some(b) => Arc::clone(b),
+            None => return 0,
+        }
+    }; // lock dropped here
     let et = match EventType::from_u32(event_type) {
         Ok(et) => et,
         Err(_) => return 0,
@@ -57,7 +64,7 @@ fn event_bus_bindgen_publish(handle_id: u32, event_type: u32, payload_json: &str
 /// Get subscriber count for an event type.
 #[deno_bindgen]
 fn event_bus_bindgen_subscriber_count(handle_id: u32, event_type: u32) -> u32 {
-    let map = handles().lock().unwrap();
+    let map = handles().lock().unwrap_or_else(|e| e.into_inner());
     let bus = match map.get(&handle_id) {
         Some(b) => b,
         None => return 0,
@@ -72,5 +79,5 @@ fn event_bus_bindgen_subscriber_count(handle_id: u32, event_type: u32) -> u32 {
 /// Destroy an EventBus handle.
 #[deno_bindgen]
 fn event_bus_bindgen_destroy(handle_id: u32) {
-    handles().lock().unwrap().remove(&handle_id);
+    handles().lock().unwrap_or_else(|e| e.into_inner()).remove(&handle_id);
 }

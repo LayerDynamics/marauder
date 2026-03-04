@@ -1,2 +1,16 @@
-// Background process management
-// Skeleton — full implementation in Phase 9
+//! Background process management for the Marauder multiplexer daemon.
+//!
+//! The daemon runs as a headless process, managing multiple terminal sessions
+//! that clients can attach/detach from (like tmux/screen). It communicates
+//! with clients via the IPC layer (`pkg/ipc`).
+//!
+//! Phase 1: Core types, session tracking, and daemon lifecycle skeleton.
+
+pub mod error;
+pub mod session;
+pub mod daemon;
+pub mod ffi;
+
+pub use error::DaemonError;
+pub use session::{Session, SessionId, SessionInfo};
+pub use daemon::MarauderDaemon;

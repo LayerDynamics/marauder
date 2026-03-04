@@ -182,11 +182,10 @@ impl ConfigStore {
     fn publish_change_event(&self, changed_keys: &[String]) {
         if let Some(ref bus) = self.event_bus {
             use marauder_event_bus::{Event, EventType};
-            let payload = serde_json::to_vec(&serde_json::json!({
-                "changed_keys": changed_keys
-            }))
-            .unwrap_or_default();
-            let event = Event::new(EventType::ConfigChanged, payload);
+            let event = Event::new(
+                EventType::ConfigChanged,
+                serde_json::json!({ "changed_keys": changed_keys }),
+            );
             bus.publish(event);
         }
     }

@@ -54,19 +54,24 @@ fn resolve_default_shell() -> String {
         if path.is_absolute() {
             return shell;
         }
-        // $SHELL is relative — try to resolve via PATH lookup
-        if let Ok(output) = std::process::Command::new("which").arg(&shell).output() {
-            if output.status.success() {
-                if let Ok(resolved) = String::from_utf8(output.stdout) {
-                    let resolved = resolved.trim().to_string();
-                    if !resolved.is_empty() {
-                        return resolved;
-                    }
-                }
-            }
+        // $SHELL is relative — resolve via pure-Rust PATH lookup
+        if let Some(resolved) = resolve_in_path(&shell) {
+            return resolved;
         }
     }
     "/bin/sh".into()
+}
+
+/// Resolve a command name to an absolute path by searching PATH directories.
+fn resolve_in_path(name: &str) -> Option<String> {
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in path_var.split(':') {
+        let candidate = std::path::Path::new(dir).join(name);
+        if candidate.is_file() {
+            return candidate.to_str().map(|s| s.to_string());
+        }
+    }
+    None
 }
 
 /// Default user config path, respecting XDG_CONFIG_HOME.

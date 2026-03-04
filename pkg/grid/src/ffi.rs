@@ -204,6 +204,51 @@ pub unsafe extern "C" fn grid_get_selection_text(
     bytes.len()
 }
 
+/// Get dirty row indices. Writes row indices to `out_buf`. Returns count written.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `grid_create`.
+/// - `out_buf` must point to at least `out_buf_len` writable u32 values.
+#[no_mangle]
+pub unsafe extern "C" fn grid_get_dirty_rows(
+    handle: *mut GridHandle,
+    out_buf: *mut u32,
+    out_buf_len: usize,
+) -> usize {
+    if handle.is_null() || out_buf.is_null() {
+        return 0;
+    }
+    let handle = unsafe { &*handle };
+    let grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let dirty = grid.get_dirty_rows();
+    let out = unsafe { std::slice::from_raw_parts_mut(out_buf, out_buf_len) };
+    let mut count = 0;
+    for (i, &is_dirty) in dirty.iter().enumerate() {
+        if is_dirty {
+            if count >= out_buf_len {
+                break;
+            }
+            out[count] = i as u32;
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Clear dirty tracking flags.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `grid_create`.
+#[no_mangle]
+pub unsafe extern "C" fn grid_clear_dirty(handle: *mut GridHandle) {
+    if handle.is_null() {
+        return;
+    }
+    let handle = unsafe { &*handle };
+    let mut grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    grid.clear_dirty();
+}
+
 /// Destroy a grid handle, freeing its memory.
 ///
 /// # Safety

@@ -14,21 +14,26 @@ fn handles() -> &'static Mutex<HashMap<u32, Arc<RwLock<ConfigStore>>>> {
 }
 
 fn next_id() -> u32 {
-    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap();
+    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap_or_else(|e| e.into_inner());
     let val = *id;
-    *id += 1;
-    val
+    match val.checked_add(1) {
+        Some(next) => { *id = next; val }
+        None => {
+            tracing::error!("bindgen handle ID counter overflow");
+            0
+        }
+    }
 }
 
 fn get_store(handle_id: u32) -> Option<Arc<RwLock<ConfigStore>>> {
-    handles().lock().unwrap().get(&handle_id).cloned()
+    handles().lock().unwrap_or_else(|e| e.into_inner()).get(&handle_id).cloned()
 }
 
 /// Create a new ConfigStore with defaults. Returns a handle ID.
 #[deno_bindgen]
 fn config_store_bindgen_create() -> u32 {
     let id = next_id();
-    handles().lock().unwrap().insert(id, Arc::new(RwLock::new(ConfigStore::new())));
+    handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::new(RwLock::new(ConfigStore::new())));
     id
 }
 
@@ -117,5 +122,5 @@ fn config_store_bindgen_reload(handle_id: u32) -> u8 {
 /// Destroy a ConfigStore handle.
 #[deno_bindgen]
 fn config_store_bindgen_destroy(handle_id: u32) {
-    handles().lock().unwrap().remove(&handle_id);
+    handles().lock().unwrap_or_else(|e| e.into_inner()).remove(&handle_id);
 }
