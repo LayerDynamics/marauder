@@ -202,6 +202,10 @@ impl MarauderRuntime {
     pub fn resize_pane(&mut self, pane_id: PaneId, rows: u16, cols: u16) -> Result<(), RuntimeError> {
         self.ensure_running()?;
 
+        if rows == 0 || cols == 0 {
+            return Err(RuntimeError::InvalidResize { rows, cols });
+        }
+
         // Check pipeline exists FIRST to avoid resizing PTY without a matching grid
         if !self.pipelines.contains_key(&pane_id) {
             return Err(RuntimeError::PaneNotFound(pane_id));

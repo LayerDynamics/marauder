@@ -170,6 +170,8 @@ impl Grid {
     }
 
     /// Extract selected text as a string.
+    // TODO: When viewport_offset > 0, selection coordinates may refer to
+    // scrollback rows. Currently only the active screen is searched.
     pub fn get_selection_text(&self) -> Option<String> {
         let sel = self.selection.as_ref()?;
         let screen = self.active_screen();
@@ -224,8 +226,22 @@ impl Grid {
             TerminalAction::CursorMove { direction, count } => {
                 let n = *count as usize;
                 match direction {
-                    CursorDirection::Up => self.cursor.row = self.cursor.row.saturating_sub(n),
-                    CursorDirection::Down => self.cursor.row = (self.cursor.row + n).min(self.rows().saturating_sub(1)),
+                    CursorDirection::Up => {
+                        let top = if self.cursor.row >= self.scroll_top && self.cursor.row <= self.scroll_bottom {
+                            self.scroll_top
+                        } else {
+                            0
+                        };
+                        self.cursor.row = self.cursor.row.saturating_sub(n).max(top);
+                    }
+                    CursorDirection::Down => {
+                        let bottom = if self.cursor.row >= self.scroll_top && self.cursor.row <= self.scroll_bottom {
+                            self.scroll_bottom
+                        } else {
+                            self.rows().saturating_sub(1)
+                        };
+                        self.cursor.row = (self.cursor.row + n).min(bottom);
+                    }
                     CursorDirection::Forward => self.cursor.col = (self.cursor.col + n).min(self.cols().saturating_sub(1)),
                     CursorDirection::Back => self.cursor.col = self.cursor.col.saturating_sub(n),
                 }

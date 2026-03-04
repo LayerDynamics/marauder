@@ -99,8 +99,7 @@ impl Screen {
         } else if new_rows < self.rows.len() {
             // Remove rows from the top, pushing them to scrollback
             let excess = self.rows.len() - new_rows;
-            for _ in 0..excess {
-                let row = self.rows.remove(0);
+            for row in self.rows.drain(..excess) {
                 self.scrollback.push_back(row);
                 if self.scrollback.len() > self.scrollback_capacity {
                     self.scrollback.pop_front();

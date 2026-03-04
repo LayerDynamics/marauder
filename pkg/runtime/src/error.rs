@@ -29,6 +29,9 @@ pub enum RuntimeError {
 
     #[error("invalid shell path: {0}")]
     InvalidShell(String),
+
+    #[error("invalid resize dimensions: {rows}x{cols}")]
+    InvalidResize { rows: u16, cols: u16 },
 }
 
 impl RuntimeError {
