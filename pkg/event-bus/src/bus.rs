@@ -2,14 +2,26 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Mutex};
 
 use crate::events::{Event, EventType};
-use crate::interceptor::{InterceptorAction, RegisteredInterceptor, Interceptor};
+use crate::interceptor::{InterceptorAction, InterceptorId, RegisteredInterceptor, Interceptor};
 
 /// Callback type for event subscribers.
 pub type SubscriberCallback = Arc<dyn Fn(&Event) + Send + Sync>;
 
 /// A unique subscriber ID for unsubscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SubscriberId(pub u64);
+pub struct SubscriberId(pub(crate) u64);
+
+impl SubscriberId {
+    /// Get the raw ID value (for FFI and serialization).
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Construct from a raw ID (for FFI boundary use only).
+    pub fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
+}
 
 struct Subscriber {
     id: SubscriberId,
@@ -33,6 +45,7 @@ pub struct EventBus {
 }
 
 impl EventBus {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             subscribers: RwLock::new(HashMap::new()),
@@ -68,38 +81,54 @@ impl EventBus {
         }
     }
 
-    /// Register an interceptor that can modify or suppress events.
-    pub fn add_interceptor(&self, interceptor: Box<dyn Interceptor>) {
+    /// Register an interceptor that can modify or suppress events. Returns an ID for removal.
+    pub fn add_interceptor(&self, interceptor: Box<dyn Interceptor>) -> InterceptorId {
+        let mut next_id = self.next_id.lock().unwrap_or_else(|e| e.into_inner());
+        let id = InterceptorId(*next_id);
+        *next_id += 1;
+
         let mut interceptors = self.interceptors.write().unwrap_or_else(|e| e.into_inner());
-        interceptors.push(RegisteredInterceptor::new(interceptor));
+        interceptors.push(RegisteredInterceptor::new(id, interceptor));
         interceptors.sort_by_key(|i| i.priority);
+        id
+    }
+
+    /// Get the number of subscribers for a given event type.
+    pub fn subscriber_count(&self, event_type: EventType) -> usize {
+        let subs = self.subscribers.read().unwrap_or_else(|e| e.into_inner());
+        subs.get(&event_type).map_or(0, |list| list.len())
+    }
+
+    /// Remove an interceptor by its ID.
+    pub fn remove_interceptor(&self, id: InterceptorId) {
+        let mut interceptors = self.interceptors.write().unwrap_or_else(|e| e.into_inner());
+        interceptors.retain(|i| i.id != id);
     }
 
     /// Publish an event. Interceptors run first (in priority order), then subscribers.
     ///
     /// Safe against re-entrancy: locks are dropped before invoking any callbacks.
     pub fn publish(&self, event: Event) {
-        // Run interceptors — clone the list under lock, then drop lock before invoking
+        // Run interceptors — snapshot the list under lock, then drop lock before invoking.
+        // This prevents deadlock if an interceptor calls back into the bus.
         let mut current_event = event;
-        {
+        let interceptor_snapshot: Vec<_> = {
             let interceptors = self.interceptors.read().unwrap_or_else(|e| e.into_inner());
-            // Hold lock, run interceptors, drop lock. Interceptors should NOT
-            // call back into the bus. For subscriber safety we clone, but interceptors
-            // are expected to be pure transforms.
-            for reg in interceptors.iter() {
-                match reg.interceptor.intercept(&current_event) {
-                    InterceptorAction::Pass => {}
-                    InterceptorAction::Modify(modified) => {
-                        current_event = modified;
-                    }
-                    InterceptorAction::Suppress => {
-                        tracing::trace!(event_type = ?current_event.event_type, "Event suppressed by interceptor");
-                        return;
-                    }
+            interceptors.iter().map(|reg| reg.interceptor_arc()).collect()
+        };
+        // Interceptor lock is now dropped — safe to call interceptors
+        for interceptor in &interceptor_snapshot {
+            match interceptor.intercept(&current_event) {
+                InterceptorAction::Pass => {}
+                InterceptorAction::Modify(modified) => {
+                    current_event = modified;
+                }
+                InterceptorAction::Suppress => {
+                    tracing::trace!(event_type = ?current_event.event_type, "Event suppressed by interceptor");
+                    return;
                 }
             }
         }
-        // Interceptor lock is now dropped
 
         // Dispatch to subscribers — clone list under lock, drop lock, then invoke
         let subscriber_snapshot = {

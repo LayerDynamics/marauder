@@ -41,6 +41,9 @@ pub fn open_pty(config: &PtyConfig) -> anyhow::Result<OpenPtyResult> {
     }
 
     let child = pair.slave.spawn_command(cmd)?;
+    // Explicitly drop the slave side now that the child is spawned.
+    // On some platforms, not closing it can cause read issues.
+    drop(pair.slave);
 
     let reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;

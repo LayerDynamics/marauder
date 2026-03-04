@@ -22,9 +22,14 @@ pub struct PtyConfig {
 }
 
 /// An active PTY session holding the master, reader, writer, and child process.
+///
+/// The `reader` field is `Option` because it may be taken by `PtyReader::spawn()` for
+/// async reading. Once taken, `PtyManager::read()` will return an error for that session.
+/// The two read modes are mutually exclusive: synchronous (`PtyManager::read`) or
+/// async (`PtyReader::spawn`).
 pub struct PtySession {
     pub(crate) master: Box<dyn MasterPty + Send>,
-    pub(crate) reader: Box<dyn Read + Send>,
+    pub(crate) reader: Option<Box<dyn Read + Send>>,
     pub(crate) writer: Box<dyn Write + Send>,
     pub(crate) child: Box<dyn Child + Send + Sync>,
     pub(crate) config: PtyConfig,
@@ -38,6 +43,7 @@ pub struct PtyManager {
 }
 
 impl PtyManager {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
@@ -59,7 +65,7 @@ impl PtyManager {
 
         self.sessions.insert(id, PtySession {
             master: result.master,
-            reader: result.reader,
+            reader: Some(result.reader),
             writer: result.writer,
             child: result.child,
             config,
@@ -133,12 +139,27 @@ impl PtyManager {
     }
 
     /// Read available data from a PTY session. Non-blocking best-effort read.
+    ///
+    /// Returns an error if the reader has been taken by `take_reader()` for async mode.
     pub fn read(&mut self, id: PaneId, buf: &mut [u8]) -> anyhow::Result<usize> {
         let session = self.sessions.get_mut(&id)
             .ok_or_else(|| anyhow::anyhow!("No PTY session with id {id}"))?;
 
-        let n = session.reader.read(buf)?;
+        let reader = session.reader.as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Reader for pane {id} has been taken for async mode"))?;
+
+        let n = reader.read(buf)?;
         Ok(n)
+    }
+
+    /// Take ownership of the reader stream for async reading (e.g., `PtyReader::spawn`).
+    /// After this, `read()` will return an error for this session.
+    pub fn take_reader(&mut self, id: PaneId) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
+        let session = self.sessions.get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("No PTY session with id {id}"))?;
+
+        session.reader.take()
+            .ok_or_else(|| anyhow::anyhow!("Reader for pane {id} already taken"))
     }
 
     /// Get the child process ID for a session.

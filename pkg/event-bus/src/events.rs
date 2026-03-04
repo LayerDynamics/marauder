@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+/// Epoch anchor: the Instant at process start, paired with the corresponding SystemTime.
+/// This lets us derive monotonic timestamps relative to a known epoch.
+static EPOCH_ANCHOR: OnceLock<(Instant, u64)> = OnceLock::new();
+
+fn epoch_anchor() -> &'static (Instant, u64) {
+    EPOCH_ANCHOR.get_or_init(|| {
+        let now_system = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+        (Instant::now(), now_system)
+    })
+}
 
 #[derive(Debug, Error)]
 pub enum EventError {
@@ -70,11 +85,40 @@ impl EventType {
 
     /// Try to convert a u32 discriminant to an EventType.
     pub fn from_u32(value: u32) -> Result<Self, EventError> {
-        if value > Self::MAX_DISCRIMINANT {
-            return Err(EventError::InvalidEventType(value));
+        match value {
+            0 => Ok(Self::KeyInput),
+            1 => Ok(Self::MouseInput),
+            2 => Ok(Self::PasteInput),
+            3 => Ok(Self::PtyOutput),
+            4 => Ok(Self::PtyExit),
+            5 => Ok(Self::PtyError),
+            6 => Ok(Self::ParserAction),
+            7 => Ok(Self::GridUpdated),
+            8 => Ok(Self::GridResized),
+            9 => Ok(Self::GridScrolled),
+            10 => Ok(Self::SelectionChanged),
+            11 => Ok(Self::ShellPromptDetected),
+            12 => Ok(Self::ShellCommandStarted),
+            13 => Ok(Self::ShellCommandFinished),
+            14 => Ok(Self::ShellCwdChanged),
+            15 => Ok(Self::RenderFrameRequested),
+            16 => Ok(Self::RenderFrameCompleted),
+            17 => Ok(Self::OverlayChanged),
+            18 => Ok(Self::ConfigChanged),
+            19 => Ok(Self::ConfigError),
+            20 => Ok(Self::SessionCreated),
+            21 => Ok(Self::SessionClosed),
+            22 => Ok(Self::PaneCreated),
+            23 => Ok(Self::PaneClosed),
+            24 => Ok(Self::PaneFocused),
+            25 => Ok(Self::TabCreated),
+            26 => Ok(Self::TabClosed),
+            27 => Ok(Self::TabFocused),
+            28 => Ok(Self::ExtensionLoaded),
+            29 => Ok(Self::ExtensionUnloaded),
+            30 => Ok(Self::ExtensionMessage),
+            _ => Err(EventError::InvalidEventType(value)),
         }
-        // SAFETY: value is within the valid range of the #[repr(u32)] enum
-        Ok(unsafe { std::mem::transmute(value) })
     }
 
     /// Convert to u32 discriminant.
@@ -136,11 +180,10 @@ impl Event {
         serde_json::from_slice(&self.payload)
     }
 
-    /// Get the current timestamp in microseconds.
+    /// Get a monotonic timestamp in microseconds (anchored to UNIX epoch at process start).
     pub fn now_us() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as u64
+        let (anchor_instant, anchor_us) = epoch_anchor();
+        let elapsed = anchor_instant.elapsed().as_micros() as u64;
+        anchor_us + elapsed
     }
 }

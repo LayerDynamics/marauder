@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::events::Event;
 
 /// What an interceptor decides to do with an event.
@@ -22,18 +24,29 @@ pub trait Interceptor: Send + Sync {
     fn intercept(&self, event: &Event) -> InterceptorAction;
 }
 
+/// Unique ID for an interceptor, used for removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InterceptorId(pub(crate) u64);
+
 /// A boxed interceptor with its priority cached for sorting.
 pub(crate) struct RegisteredInterceptor {
+    pub id: InterceptorId,
     pub priority: i32,
-    pub interceptor: Box<dyn Interceptor>,
+    pub interceptor: Arc<dyn Interceptor>,
 }
 
 impl RegisteredInterceptor {
-    pub fn new(interceptor: Box<dyn Interceptor>) -> Self {
+    pub fn new(id: InterceptorId, interceptor: Box<dyn Interceptor>) -> Self {
         let priority = interceptor.priority();
         Self {
+            id,
             priority,
-            interceptor,
+            interceptor: Arc::from(interceptor),
         }
+    }
+
+    /// Get an Arc clone for snapshot-then-invoke pattern.
+    pub fn interceptor_arc(&self) -> Arc<dyn Interceptor> {
+        Arc::clone(&self.interceptor)
     }
 }

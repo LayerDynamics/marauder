@@ -16,3 +16,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+deno_core = { workspace = true }
+deno_error = { workspace = true }
+tauri = { workspace = true }
+deno_bindgen = { workspace = true }

@@ -63,8 +63,15 @@ impl TauriBridge {
         for &event_type in BRIDGE_EVENT_TYPES {
             let channel = channel.clone();
             let id = bus.subscribe(event_type, move |event: &Event| {
-                if let Ok(json) = serde_json::to_string(event) {
-                    let _ = channel.send(json);
+                match serde_json::to_string(event) {
+                    Ok(json) => {
+                        if let Err(e) = channel.send(json) {
+                            tracing::warn!(error = %e, "TauriBridge: failed to send event to webview channel");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "TauriBridge: failed to serialize event");
+                    }
                 }
             });
             subscriber_ids.push((event_type, id));
@@ -87,13 +94,24 @@ impl Drop for TauriBridge {
 
 /// Managed state for tracking webview channel subscriptions so they can be cleaned up.
 pub struct WebviewSubscriptions {
+    bus: SharedEventBus,
     inner: Mutex<Vec<(EventType, SubscriberId)>>,
 }
 
 impl WebviewSubscriptions {
-    pub fn new() -> Self {
+    pub fn new(bus: SharedEventBus) -> Self {
         Self {
+            bus,
             inner: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Drop for WebviewSubscriptions {
+    fn drop(&mut self) {
+        let subs = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        for (event_type, id) in subs.iter() {
+            self.bus.unsubscribe(*event_type, *id);
         }
     }
 }
@@ -138,11 +156,18 @@ pub fn event_bus_subscribe_channel(
         let et = EventType::from_u32(et_u32).map_err(|e| e.to_string())?;
         let channel = channel.clone();
         let id = state.subscribe(et, move |event: &Event| {
-            if let Ok(json) = serde_json::to_string(event) {
-                let _ = channel.send(json);
+            match serde_json::to_string(event) {
+                Ok(json) => {
+                    if let Err(e) = channel.send(json) {
+                        tracing::warn!(error = %e, "event_bus_subscribe_channel: failed to send to webview");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "event_bus_subscribe_channel: failed to serialize event");
+                }
             }
         });
-        ids.push(id.0);
+        ids.push(id.as_u64());
         tracked.push((et, id));
     }
     Ok(ids)
@@ -157,7 +182,7 @@ pub fn event_bus_unsubscribe_channel(
     subscriber_id: u64,
 ) -> Result<(), String> {
     let et = EventType::from_u32(event_type).map_err(|e| e.to_string())?;
-    let sid = SubscriberId(subscriber_id);
+    let sid = SubscriberId::from_raw(subscriber_id);
     state.unsubscribe(et, sid);
 
     let mut tracked = subs_state.inner.lock().unwrap_or_else(|e| e.into_inner());
