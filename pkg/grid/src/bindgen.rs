@@ -34,6 +34,9 @@ fn get_grid(handle_id: u32) -> Option<Arc<Mutex<Grid>>> {
 #[deno_bindgen]
 fn grid_bindgen_create(rows: u32, cols: u32) -> u32 {
     let id = next_id();
+    if id == 0 {
+        return 0; // overflow sentinel — caller must treat 0 as invalid
+    }
     handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::new(Mutex::new(Grid::new(rows as usize, cols as usize))));
     id
 }
