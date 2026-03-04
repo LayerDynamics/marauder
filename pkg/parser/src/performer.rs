@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-
 use crate::actions::*;
 
 /// VT parser wrapping the `vte` crate.
@@ -15,10 +13,9 @@ impl MarauderParser {
     }
 
     /// Feed bytes into the parser, invoking the callback for each action.
-    pub fn feed<F: FnMut(TerminalAction)>(&mut self, bytes: &[u8], callback: F) {
-        let callback = RefCell::new(callback);
+    pub fn feed<F: FnMut(TerminalAction)>(&mut self, bytes: &[u8], mut callback: F) {
         let mut performer = MarauderPerformer {
-            callback: &callback,
+            callback: &mut callback,
         };
         self.parser.advance(&mut performer, bytes);
     }
@@ -32,12 +29,12 @@ impl Default for MarauderParser {
 
 /// Implements `vte::Perform` to convert VTE callbacks into `TerminalAction` variants.
 struct MarauderPerformer<'a, F: FnMut(TerminalAction)> {
-    callback: &'a RefCell<F>,
+    callback: &'a mut F,
 }
 
 impl<'a, F: FnMut(TerminalAction)> MarauderPerformer<'a, F> {
-    fn emit(&self, action: TerminalAction) {
-        (self.callback.borrow_mut())(action);
+    fn emit(&mut self, action: TerminalAction) {
+        (self.callback)(action);
     }
 }
 
@@ -230,7 +227,7 @@ impl<'a, F: FnMut(TerminalAction)> vte::Perform for MarauderPerformer<'a, F> {
 
 impl<'a, F: FnMut(TerminalAction)> MarauderPerformer<'a, F> {
     /// Parse SGR parameter sequence into individual `SetAttribute` actions.
-    fn dispatch_sgr(&self, params: &[u16]) {
+    fn dispatch_sgr(&mut self, params: &[u16]) {
         if params.is_empty() {
             self.emit(TerminalAction::SetAttribute(SgrAttribute::Reset));
             return;
@@ -294,7 +291,7 @@ impl<'a, F: FnMut(TerminalAction)> MarauderPerformer<'a, F> {
     }
 
     /// Parse extended color (38;5;N or 38;2;R;G;B), advancing `i` past consumed params.
-    fn parse_extended_color(&self, params: &[u16], i: &mut usize) -> Option<ColorSpec> {
+    fn parse_extended_color(&mut self, params: &[u16], i: &mut usize) -> Option<ColorSpec> {
         if *i + 1 >= params.len() {
             return None;
         }

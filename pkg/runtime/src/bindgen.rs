@@ -75,7 +75,10 @@ fn runtime_bindgen_boot(handle_id: u32) -> u8 {
         Some(e) => e,
         None => return 0,
     };
-    // Acquire mutex inside block_on to prevent deadlock
+    // SAFETY: lock_or_recover acquires a std::sync::Mutex inside block_on.
+    // This is safe because block_on runs synchronously on the calling thread,
+    // and boot() operates on &mut MarauderRuntime directly without
+    // re-acquiring this mutex. No spawned tasks access RuntimeHandle.runtime.
     match tokio_rt.block_on(async {
         let mut rt = lock_or_recover(&runtime, "runtime");
         rt.boot().await
@@ -171,6 +174,10 @@ fn runtime_bindgen_shutdown(handle_id: u32) -> u8 {
         Some(e) => e,
         None => return 0,
     };
+    // SAFETY: lock_or_recover acquires a std::sync::Mutex inside block_on.
+    // This is safe because block_on runs synchronously on the calling thread,
+    // and shutdown() operates on &mut MarauderRuntime directly without
+    // re-acquiring this mutex. No spawned tasks access RuntimeHandle.runtime.
     match tokio_rt.block_on(async {
         let mut rt = lock_or_recover(&runtime, "runtime");
         rt.shutdown().await

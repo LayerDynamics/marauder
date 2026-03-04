@@ -54,6 +54,18 @@ impl ConfigLayer {
 
     /// Load a layer from a TOML file. Returns Ok(None) if the file doesn't exist.
     pub fn from_toml_file(path: &std::path::Path, kind: LayerKind) -> Result<Option<Self>, ConfigError> {
+        const MAX_CONFIG_SIZE: u64 = 1024 * 1024; // 1 MiB
+        let metadata = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(ConfigError::IoError(e)),
+        };
+        if metadata.len() > MAX_CONFIG_SIZE {
+            return Err(ConfigError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("config file too large: {} bytes (max {})", metadata.len(), MAX_CONFIG_SIZE),
+            )));
+        }
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -96,7 +108,9 @@ pub fn flatten_toml(value: &toml::Value, prefix: &str, out: &mut HashMap<String,
 /// Convert a toml::Value to a serde_json::Value.
 fn toml_to_json(value: &toml::Value) -> Value {
     match value {
-        toml::Value::String(s) if s == "__null__" => Value::Null,
+        // Sentinel string representing JSON null in TOML (which has no native null).
+        // Uses a namespaced prefix to avoid collisions with user-defined strings.
+        toml::Value::String(s) if s == "__marauder_null__" => Value::Null,
         toml::Value::String(s) => Value::String(s.clone()),
         toml::Value::Integer(i) => Value::Number((*i).into()),
         toml::Value::Float(f) => {
@@ -170,6 +184,6 @@ fn json_to_toml(value: &Value) -> toml::Value {
             toml::Value::Table(table)
         }
         // TOML has no null type; use a sentinel string to preserve round-trip semantics.
-        Value::Null => toml::Value::String("__null__".to_string()),
+        Value::Null => toml::Value::String("__marauder_null__".to_string()),
     }
 }

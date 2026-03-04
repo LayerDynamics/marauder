@@ -15,21 +15,26 @@ fn handles() -> &'static Mutex<HashMap<u32, Arc<Mutex<Grid>>>> {
 }
 
 fn next_id() -> u32 {
-    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap();
+    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap_or_else(|e| e.into_inner());
     let val = *id;
-    *id += 1;
-    val
+    match val.checked_add(1) {
+        Some(next) => { *id = next; val }
+        None => {
+            tracing::error!("bindgen handle ID counter overflow");
+            0
+        }
+    }
 }
 
 fn get_grid(handle_id: u32) -> Option<Arc<Mutex<Grid>>> {
-    handles().lock().unwrap().get(&handle_id).cloned()
+    handles().lock().unwrap_or_else(|e| e.into_inner()).get(&handle_id).cloned()
 }
 
 /// Create a new grid. Returns a handle ID.
 #[deno_bindgen]
 fn grid_bindgen_create(rows: u32, cols: u32) -> u32 {
     let id = next_id();
-    handles().lock().unwrap().insert(id, Arc::new(Mutex::new(Grid::new(rows as usize, cols as usize))));
+    handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::new(Mutex::new(Grid::new(rows as usize, cols as usize))));
     id
 }
 
@@ -119,5 +124,5 @@ fn grid_bindgen_select(handle_id: u32, start_row: u32, start_col: u32, end_row: 
 /// Destroy a grid handle.
 #[deno_bindgen]
 fn grid_bindgen_destroy(handle_id: u32) {
-    handles().lock().unwrap().remove(&handle_id);
+    handles().lock().unwrap_or_else(|e| e.into_inner()).remove(&handle_id);
 }

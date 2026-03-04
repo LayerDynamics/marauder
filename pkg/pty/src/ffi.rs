@@ -100,6 +100,10 @@ pub unsafe extern "C" fn pty_create(
 
 /// Read data from a PTY session. Returns bytes read, or -1 on error.
 ///
+/// **WARNING**: This function blocks until data is available. For non-blocking
+/// PTY reading, use `PtyReader::spawn` (async mode) instead of calling this
+/// directly. In FFI contexts, prefer the async pipeline over polling `pty_read`.
+///
 /// # Safety
 /// - `handle` must be a valid pointer from `pty_manager_create`.
 /// - `buf` must point to at least `buf_len` writable bytes.

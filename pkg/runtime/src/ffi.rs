@@ -57,6 +57,10 @@ pub unsafe extern "C" fn runtime_boot(handle: *mut RuntimeHandle) -> i32 {
     let handle = unsafe { &*handle };
     // Acquire mutex INSIDE block_on to prevent deadlock if boot() spawns
     // tasks that need the runtime mutex.
+    // SAFETY: lock_or_recover acquires a std::sync::Mutex inside block_on.
+    // This is safe because block_on runs synchronously on the calling thread,
+    // and boot() operates on &mut MarauderRuntime directly without
+    // re-acquiring this mutex. No spawned tasks access RuntimeHandle.runtime.
     match handle.tokio_rt.block_on(async {
         let mut rt = lock_or_recover(&handle.runtime, "runtime");
         rt.boot().await
@@ -193,6 +197,10 @@ pub unsafe extern "C" fn runtime_shutdown(handle: *mut RuntimeHandle) -> i32 {
         return -1;
     }
     let handle = unsafe { &*handle };
+    // SAFETY: lock_or_recover acquires a std::sync::Mutex inside block_on.
+    // This is safe because block_on runs synchronously on the calling thread,
+    // and shutdown() operates on &mut MarauderRuntime directly without
+    // re-acquiring this mutex. No spawned tasks access RuntimeHandle.runtime.
     match handle.tokio_rt.block_on(async {
         let mut rt = lock_or_recover(&handle.runtime, "runtime");
         rt.shutdown().await
