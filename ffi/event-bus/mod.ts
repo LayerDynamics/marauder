@@ -4,6 +4,8 @@
  * Wraps the C ABI exported by `libmarauder_event_bus` in an ergonomic TypeScript class.
  */
 
+import { bufferPtr, resolveLibPath } from "../_lib.ts";
+
 /** Event type discriminants matching `EventType` in `pkg/event-bus/src/events.rs`. */
 export enum EventType {
   // Input layer
@@ -57,67 +59,31 @@ export interface BusEvent {
   source: string | null;
 }
 
-/** Resolve the path to the compiled event-bus shared library. */
-function resolveLibPath(): string {
-  const libName = (() => {
-    switch (Deno.build.os) {
-      case "darwin":
-        return "libmarauder_event_bus.dylib";
-      case "linux":
-        return "libmarauder_event_bus.so";
-      case "windows":
-        return "marauder_event_bus.dll";
-      default:
-        throw new Error(`Unsupported platform: ${Deno.build.os}`);
-    }
-  })();
-
-  const envDir = Deno.env.get("MARAUDER_LIB_DIR");
-  if (envDir) {
-    return `${envDir}/${libName}`;
-  }
-
-  // Try release first, then debug
-  const candidates = [
-    `target/release/${libName}`,
-    `target/debug/${libName}`,
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      Deno.statSync(candidate);
-      return candidate;
-    } catch {
-      // continue
-    }
-  }
-
-  // Fall back to debug path (will error on dlopen if missing)
-  return `target/debug/${libName}`;
-}
-
-const lib = Deno.dlopen(resolveLibPath(), {
-  event_bus_create: {
-    parameters: [],
-    result: "pointer",
-  },
-  event_bus_subscribe: {
-    parameters: ["pointer", "u32", "function", "pointer"],
-    result: "u64",
-  },
-  event_bus_unsubscribe: {
-    parameters: ["pointer", "u32", "u64"],
-    result: "i32",
-  },
-  event_bus_publish: {
-    parameters: ["pointer", "u32", "pointer", "usize"],
-    result: "i32",
-  },
-  event_bus_destroy: {
-    parameters: ["pointer"],
-    result: "void",
-  },
-} as const);
+const lib = Deno.dlopen(
+  resolveLibPath("marauder_event_bus"),
+  {
+    event_bus_create: {
+      parameters: [],
+      result: "pointer",
+    },
+    event_bus_subscribe: {
+      parameters: ["pointer", "u32", "function", "pointer"],
+      result: "u64",
+    },
+    event_bus_unsubscribe: {
+      parameters: ["pointer", "u32", "u64"],
+      result: "i32",
+    },
+    event_bus_publish: {
+      parameters: ["pointer", "u32", "pointer", "usize"],
+      result: "i32",
+    },
+    event_bus_destroy: {
+      parameters: ["pointer"],
+      result: "void",
+    },
+  } as const,
+);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -125,11 +91,19 @@ const decoder = new TextDecoder();
 /** Callback type for event subscribers. */
 export type EventCallback = (event: BusEvent) => void;
 
+/** FFI callback definition for event handlers. */
+const EVENT_CALLBACK_DEF = {
+  parameters: ["pointer", "usize", "pointer"],
+  result: "void",
+} as const;
+
+type EventFfiCallback = Deno.UnsafeCallback<typeof EVENT_CALLBACK_DEF>;
+
 /** Tracked subscription for cleanup. */
 interface Subscription {
   eventType: EventType;
-  subscriberId: number | bigint;
-  ffiCallback: Deno.UnsafeCallback;
+  subscriberId: bigint;
+  ffiCallback: EventFfiCallback;
 }
 
 /**
@@ -144,7 +118,7 @@ interface Subscription {
  */
 export class EventBus {
   #handle: Deno.PointerValue;
-  #subscriptions: Map<number | bigint, Subscription> = new Map();
+  #subscriptions: Map<bigint, Subscription> = new Map();
   #closed = false;
 
   constructor() {
@@ -158,16 +132,17 @@ export class EventBus {
    * Subscribe to events of a given type.
    * Returns a subscriber ID that can be used to unsubscribe.
    */
-  subscribe(eventType: EventType, callback: EventCallback): number | bigint {
+  subscribe(eventType: EventType, callback: EventCallback): bigint {
     this.#ensureOpen();
 
     // Create a C callback that receives (event_json_ptr, event_json_len, user_data)
-    const ffiCallback = new Deno.UnsafeCallback(
-      {
-        parameters: ["pointer", "usize", "pointer"],
-        result: "void",
-      } as const,
-      (eventJsonPtr: Deno.PointerValue, eventJsonLen: number | bigint, _userData: Deno.PointerValue) => {
+    const ffiCallback: EventFfiCallback = new Deno.UnsafeCallback(
+      EVENT_CALLBACK_DEF,
+      (
+        eventJsonPtr: Deno.PointerValue,
+        eventJsonLen: number | bigint,
+        _userData: Deno.PointerValue,
+      ) => {
         const len = Number(eventJsonLen);
         if (len === 0 || eventJsonPtr === null) return;
 
@@ -192,7 +167,7 @@ export class EventBus {
       null, // user_data — not needed, closure captures state
     );
 
-    if (subscriberId === 0 || subscriberId === 0n) {
+    if (subscriberId === 0n) {
       ffiCallback.close();
       throw new Error(`Failed to subscribe to event type ${eventType}`);
     }
@@ -209,23 +184,19 @@ export class EventBus {
   /**
    * Unsubscribe a previously registered callback.
    */
-  unsubscribe(eventType: EventType, subscriberId: number | bigint): void {
+  unsubscribe(eventType: EventType, subscriberId: bigint): void {
     this.#ensureOpen();
-
-    const normalizedId = typeof subscriberId === "number" ? BigInt(subscriberId) : subscriberId;
 
     lib.symbols.event_bus_unsubscribe(
       this.#handle,
       eventType as number,
-      normalizedId,
+      subscriberId,
     );
 
-    // Normalize lookup — Deno FFI may return number or bigint for u64
-    const sub = this.#subscriptions.get(subscriberId)
-      ?? this.#subscriptions.get(typeof subscriberId === "number" ? BigInt(subscriberId) : Number(subscriberId));
+    const sub = this.#subscriptions.get(subscriberId);
     if (sub) {
       sub.ffiCallback.close();
-      this.#subscriptions.delete(sub.subscriberId);
+      this.#subscriptions.delete(subscriberId);
     }
   }
 
@@ -236,13 +207,13 @@ export class EventBus {
     this.#ensureOpen();
 
     const jsonBytes = encoder.encode(JSON.stringify(payload));
-    const buf = Deno.UnsafePointer.of(jsonBytes);
+    const buf = bufferPtr(jsonBytes);
 
     const result = lib.symbols.event_bus_publish(
       this.#handle,
       eventType as number,
       buf,
-      jsonBytes.byteLength,
+      BigInt(jsonBytes.byteLength),
     );
 
     if (result === 0) {
@@ -260,13 +231,10 @@ export class EventBus {
 
     // First unsubscribe from Rust side to prevent callbacks from firing
     for (const sub of this.#subscriptions.values()) {
-      const normalizedId = typeof sub.subscriberId === "number"
-        ? BigInt(sub.subscriberId)
-        : sub.subscriberId;
       lib.symbols.event_bus_unsubscribe(
         this.#handle,
         sub.eventType as number,
-        normalizedId,
+        sub.subscriberId,
       );
     }
 
