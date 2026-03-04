@@ -2927,6 +2927,7 @@ name = "marauder-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "deno_bindgen",
  "marauder-compute",
  "marauder-config-store",
  "marauder-event-bus",
@@ -2936,6 +2937,7 @@ dependencies = [
  "marauder-renderer",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

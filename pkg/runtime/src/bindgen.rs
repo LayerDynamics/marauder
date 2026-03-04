@@ -1,0 +1,187 @@
+//! High-level deno_bindgen bindings for the runtime.
+//!
+//! # Pane ID Convention
+//! Pane IDs are always > 0. The value 0 is used as an error sentinel.
+//! `PaneId` (u64) may exceed u32::MAX; callers should check for 0 (error).
+
+use deno_bindgen::deno_bindgen;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::config::RuntimeConfig;
+use crate::lifecycle::MarauderRuntime;
+use crate::util::lock_or_recover;
+
+struct RuntimeEntry {
+    runtime: Arc<Mutex<MarauderRuntime>>,
+    tokio_rt: Arc<tokio::runtime::Runtime>,
+}
+
+static HANDLES: OnceLock<Mutex<HashMap<u32, RuntimeEntry>>> = OnceLock::new();
+static NEXT_ID: OnceLock<Mutex<u32>> = OnceLock::new();
+
+fn handles() -> &'static Mutex<HashMap<u32, RuntimeEntry>> {
+    HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Allocate the next handle ID with overflow protection.
+/// Returns 0 if the counter would overflow (0 is never a valid handle).
+fn next_id() -> u32 {
+    let mut id = NEXT_ID.get_or_init(|| Mutex::new(1)).lock().unwrap();
+    let val = *id;
+    match val.checked_add(1) {
+        Some(next) => {
+            *id = next;
+            val
+        }
+        None => {
+            tracing::error!("bindgen handle ID counter overflow");
+            0
+        }
+    }
+}
+
+fn get_entry(handle_id: u32) -> Option<(Arc<Mutex<MarauderRuntime>>, Arc<tokio::runtime::Runtime>)> {
+    handles()
+        .lock()
+        .unwrap()
+        .get(&handle_id)
+        .map(|e| (Arc::clone(&e.runtime), Arc::clone(&e.tokio_rt)))
+}
+
+/// Create a new runtime with default config. Returns a handle ID, or 0 on error.
+#[deno_bindgen]
+fn runtime_bindgen_create() -> u32 {
+    let tokio_rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return 0,
+    };
+    let id = next_id();
+    if id == 0 {
+        return 0; // overflow
+    }
+    let entry = RuntimeEntry {
+        runtime: Arc::new(Mutex::new(MarauderRuntime::new(RuntimeConfig::default()))),
+        tokio_rt: Arc::new(tokio_rt),
+    };
+    handles().lock().unwrap().insert(id, entry);
+    id
+}
+
+/// Boot the runtime. Returns 1 on success, 0 on error.
+#[deno_bindgen]
+fn runtime_bindgen_boot(handle_id: u32) -> u8 {
+    let (runtime, tokio_rt) = match get_entry(handle_id) {
+        Some(e) => e,
+        None => return 0,
+    };
+    // Acquire mutex inside block_on to prevent deadlock
+    match tokio_rt.block_on(async {
+        let mut rt = lock_or_recover(&runtime, "runtime");
+        rt.boot().await
+    }) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Create a new pane. Returns the pane ID as string (to preserve u64 range), or empty on error.
+#[deno_bindgen]
+fn runtime_bindgen_create_pane(handle_id: u32) -> String {
+    let (runtime, _tokio_rt) = match get_entry(handle_id) {
+        Some(e) => e,
+        None => return String::new(),
+    };
+    let mut rt = lock_or_recover(&runtime, "runtime");
+    match rt.create_pane() {
+        Ok(id) => id.to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Close a pane. Returns 1 on success, 0 on error.
+#[deno_bindgen]
+fn runtime_bindgen_close_pane(handle_id: u32, pane_id: &str) -> u8 {
+    let pane_id: u64 = match pane_id.parse() {
+        Ok(id) => id,
+        Err(_) => return 0,
+    };
+    let (runtime, _tokio_rt) = match get_entry(handle_id) {
+        Some(e) => e,
+        None => return 0,
+    };
+    let mut rt = lock_or_recover(&runtime, "runtime");
+    match rt.close_pane(pane_id) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Write data to a pane. Returns bytes written as string, or empty on error.
+#[deno_bindgen]
+fn runtime_bindgen_write(handle_id: u32, pane_id: &str, data: &str) -> String {
+    let pane_id: u64 = match pane_id.parse() {
+        Ok(id) => id,
+        Err(_) => return String::new(),
+    };
+    let (runtime, _tokio_rt) = match get_entry(handle_id) {
+        Some(e) => e,
+        None => return String::new(),
+    };
+    let rt = lock_or_recover(&runtime, "runtime");
+    match rt.write_to_pane(pane_id, data.as_bytes()) {
+        Ok(n) => n.to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Resize a pane. Returns 1 on success, 0 on error.
+#[deno_bindgen]
+fn runtime_bindgen_resize_pane(handle_id: u32, pane_id: &str, rows: u16, cols: u16) -> u8 {
+    let pane_id: u64 = match pane_id.parse() {
+        Ok(id) => id,
+        Err(_) => return 0,
+    };
+    let (runtime, _tokio_rt) = match get_entry(handle_id) {
+        Some(e) => e,
+        None => return 0,
+    };
+    let mut rt = lock_or_recover(&runtime, "runtime");
+    match rt.resize_pane(pane_id, rows, cols) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Get the number of active panes.
+#[deno_bindgen]
+fn runtime_bindgen_pane_count(handle_id: u32) -> u32 {
+    let (runtime, _tokio_rt) = match get_entry(handle_id) {
+        Some(e) => e,
+        None => return 0,
+    };
+    let rt = lock_or_recover(&runtime, "runtime");
+    rt.pane_ids().len() as u32
+}
+
+/// Shutdown the runtime. Returns 1 on success, 0 on error.
+#[deno_bindgen]
+fn runtime_bindgen_shutdown(handle_id: u32) -> u8 {
+    let (runtime, tokio_rt) = match get_entry(handle_id) {
+        Some(e) => e,
+        None => return 0,
+    };
+    match tokio_rt.block_on(async {
+        let mut rt = lock_or_recover(&runtime, "runtime");
+        rt.shutdown().await
+    }) {
+        Ok(()) => 1,
+        Err(_) => 0,
+    }
+}
+
+/// Destroy a runtime handle. Callers should call shutdown first.
+#[deno_bindgen]
+fn runtime_bindgen_destroy(handle_id: u32) {
+    handles().lock().unwrap().remove(&handle_id);
+}
