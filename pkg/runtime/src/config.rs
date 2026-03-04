@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Serialize, Deserialize};
 
@@ -62,12 +62,30 @@ fn resolve_default_shell() -> String {
     "/bin/sh".into()
 }
 
+/// Return true if the path points to an executable file.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        metadata.is_file() && (metadata.permissions().mode() & 0o111) != 0
+    } else {
+        false
+    }
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// Resolve a command name to an absolute path by searching PATH directories.
+///
+/// Only returns candidates that are executable files, not just any regular file.
 fn resolve_in_path(name: &str) -> Option<String> {
     let path_var = std::env::var("PATH").ok()?;
-    for dir in path_var.split(':') {
-        let candidate = std::path::Path::new(dir).join(name);
-        if candidate.is_file() {
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if is_executable(&candidate) {
             return candidate.to_str().map(|s| s.to_string());
         }
     }

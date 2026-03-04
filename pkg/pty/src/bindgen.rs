@@ -35,6 +35,9 @@ fn get_mgr(handle_id: u32) -> Option<Arc<Mutex<PtyManager>>> {
 #[deno_bindgen]
 fn pty_bindgen_create() -> u32 {
     let id = next_id();
+    if id == 0 {
+        return 0; // overflow sentinel — caller must treat 0 as invalid
+    }
     handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::new(Mutex::new(PtyManager::new())));
     id
 }

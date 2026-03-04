@@ -3,6 +3,7 @@
 //! Manages sessions and handles IPC requests from clients.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,6 +18,10 @@ use crate::session::{Session, SessionId};
 const DEFAULT_MAX_SESSIONS: usize = 256;
 
 /// Default socket path.
+///
+/// Prefers `XDG_RUNTIME_DIR` (typically `0700`), then `$HOME/.marauder/`,
+/// and falls back to a per-user directory under `/tmp`. Callers must use
+/// [`ensure_socket_dir_secure`] before binding to enforce restrictive permissions.
 pub fn default_socket_path() -> PathBuf {
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime_dir).join("marauder/daemon.sock");
@@ -27,6 +32,28 @@ pub fn default_socket_path() -> PathBuf {
     // Use the username from USER env var or PID as fallback
     let user = std::env::var("USER").unwrap_or_else(|_| format!("pid-{}", std::process::id()));
     PathBuf::from(format!("/tmp/marauder-{}/daemon.sock", user))
+}
+
+/// Ensure the parent directory of the socket path exists with restrictive
+/// permissions (`0700`) suitable for a control socket.
+#[cfg(unix)]
+pub fn ensure_socket_dir_secure(socket_path: &Path) -> Result<(), DaemonError> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(dir) = socket_path.parent() {
+        fs::create_dir_all(dir)?;
+        let mut perms = fs::metadata(dir)?.permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(dir, perms)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn ensure_socket_dir_secure(socket_path: &Path) -> Result<(), DaemonError> {
+    if let Some(dir) = socket_path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    Ok(())
 }
 
 /// Validate that a shell path is absolute and exists on disk.
@@ -92,6 +119,9 @@ impl MarauderDaemon {
         if self.server.is_some() {
             return Err(DaemonError::AlreadyRunning);
         }
+
+        // Ensure socket directory exists with restrictive permissions (0700)
+        ensure_socket_dir_secure(&self.socket_path)?;
 
         let sessions = Arc::clone(&self.sessions);
         let max_sessions = self.max_sessions;

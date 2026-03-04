@@ -35,8 +35,11 @@ fn next_id() -> u32 {
 /// Create a new EventBus. Returns a handle ID.
 #[deno_bindgen]
 fn event_bus_bindgen_create() -> u32 {
-    let bus = Arc::new(EventBus::new());
     let id = next_id();
+    if id == 0 {
+        return 0; // overflow sentinel — caller must treat 0 as invalid
+    }
+    let bus = Arc::new(EventBus::new());
     handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, bus);
     id
 }

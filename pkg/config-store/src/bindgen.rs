@@ -33,6 +33,9 @@ fn get_store(handle_id: u32) -> Option<Arc<RwLock<ConfigStore>>> {
 #[deno_bindgen]
 fn config_store_bindgen_create() -> u32 {
     let id = next_id();
+    if id == 0 {
+        return 0; // overflow sentinel — caller must treat 0 as invalid
+    }
     handles().lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::new(RwLock::new(ConfigStore::new())));
     id
 }

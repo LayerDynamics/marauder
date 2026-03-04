@@ -24,4 +24,7 @@ pub enum IpcError {
 
     #[error("response ID mismatch: expected {expected}, got {got}")]
     ResponseIdMismatch { expected: u64, got: u64 },
+
+    #[error("protocol violation: received unexpected request from server")]
+    ProtocolViolation,
 }
