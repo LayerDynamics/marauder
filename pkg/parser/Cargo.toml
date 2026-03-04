@@ -1,0 +1,16 @@
+[package]
+name = "marauder-parser"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "marauder_parser"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+vte = { workspace = true }
+marauder-event-bus = { path = "../event-bus" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

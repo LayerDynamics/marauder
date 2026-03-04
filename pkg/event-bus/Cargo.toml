@@ -1,0 +1,15 @@
+[package]
+name = "marauder-event-bus"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "marauder_event_bus"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

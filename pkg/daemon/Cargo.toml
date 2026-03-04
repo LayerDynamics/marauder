@@ -1,0 +1,16 @@
+[package]
+name = "marauder-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "marauder_daemon"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+marauder-ipc = { path = "../ipc" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

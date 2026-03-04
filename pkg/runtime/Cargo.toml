@@ -1,0 +1,23 @@
+[package]
+name = "marauder-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "marauder_runtime"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+marauder-event-bus = { path = "../event-bus" }
+marauder-pty = { path = "../pty" }
+marauder-parser = { path = "../parser" }
+marauder-grid = { path = "../grid" }
+marauder-renderer = { path = "../renderer" }
+marauder-compute = { path = "../compute" }
+marauder-config-store = { path = "../config-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

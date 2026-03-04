@@ -1,0 +1,31 @@
+[package]
+name = "marauder"
+version = "0.1.0"
+description = "GPU-accelerated terminal emulator"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "marauder_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+tauri = { workspace = true }
+tauri-plugin-opener = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+deno_core = { workspace = true }
+marauder-event-bus = { path = "../../../pkg/event-bus" }
+marauder-pty = { path = "../../../pkg/pty" }
+marauder-parser = { path = "../../../pkg/parser" }
+marauder-grid = { path = "../../../pkg/grid" }
+marauder-renderer = { path = "../../../pkg/renderer" }
+marauder-compute = { path = "../../../pkg/compute" }
+marauder-runtime = { path = "../../../pkg/runtime" }
+marauder-config-store = { path = "../../../pkg/config-store" }

@@ -1,0 +1,17 @@
+[package]
+name = "marauder-grid"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "marauder_grid"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+marauder-event-bus = { path = "../event-bus" }
+marauder-parser = { path = "../parser" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+bitflags = { workspace = true }

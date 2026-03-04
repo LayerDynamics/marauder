@@ -1,0 +1,17 @@
+[package]
+name = "marauder-compute"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "marauder_compute"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+wgpu = { workspace = true }
+marauder-event-bus = { path = "../event-bus" }
+marauder-grid = { path = "../grid" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

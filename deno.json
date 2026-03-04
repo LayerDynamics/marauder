@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "imports": {
+    "@marauder/ffi-event-bus": "./ffi/event-bus/mod.ts",
+    "@marauder/ffi-pty": "./ffi/pty/mod.ts",
+    "@marauder/ffi-parser": "./ffi/parser/mod.ts",
+    "@marauder/ffi-grid": "./ffi/grid/mod.ts",
+    "@marauder/ffi-renderer": "./ffi/renderer/mod.ts",
+    "@marauder/ffi-compute": "./ffi/compute/mod.ts",
+    "@marauder/ffi-config-store": "./ffi/config-store/mod.ts",
+    "@marauder/shell": "./lib/shell/mod.ts",
+    "@marauder/ui": "./lib/ui/mod.ts",
+    "@marauder/io": "./lib/io/mod.ts",
+    "@marauder/dev": "./lib/dev/mod.ts"
+  },
+  "tasks": {
+    "dev": "deno run --allow-all --unstable-ffi lib/io/pipeline.ts",
+    "test": "deno test --allow-all --unstable-ffi",
+    "fmt": "deno fmt lib/ ffi/ extensions/",
+    "lint": "deno lint lib/ ffi/ extensions/",
+    "check": "deno check lib/io/mod.ts ffi/event-bus/mod.ts"
+  },
+  "workspace": [
+    "lib/shell",
+    "lib/ui",
+    "lib/io",
+    "lib/dev",
+    "ffi/event-bus",
+    "ffi/pty",
+    "ffi/parser",
+    "ffi/grid",
+    "ffi/renderer",
+    "ffi/compute",
+    "ffi/config-store",
+    "extensions/theme-default",
+    "extensions/status-bar",
+    "extensions/git-integration",
+    "extensions/search",
+    "extensions/notifications"
+  ]
+}
