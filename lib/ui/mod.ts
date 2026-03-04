@@ -8,7 +8,7 @@ import {
   type PipelineConfig,
   TerminalPipeline,
 } from "@marauder/io/pipeline.ts";
-import { Logger } from "@marauder/dev";
+import { decodeBusPayload, Logger } from "@marauder/dev";
 
 const MAX_PANES = 256;
 const MAX_TABS = 64;
@@ -36,7 +36,7 @@ export interface Tab {
   readonly id: number;
   readonly title: string;
   readonly paneIds: bigint[];
-  readonly activePane: bigint;
+  readonly activePane: bigint | null;
 }
 
 /** Internal mutable tab state */
@@ -44,7 +44,7 @@ interface MutableTab {
   id: number;
   title: string;
   paneIds: bigint[];
-  activePane: bigint;
+  activePane: bigint | null;
 }
 
 export class PaneManager {
@@ -212,11 +212,7 @@ export class TabManager {
 
   #handlePaneClosed(event: BusEvent): void {
     try {
-      const payload = event.payload && Array.isArray(event.payload)
-        ? JSON.parse(
-          new TextDecoder().decode(new Uint8Array(event.payload)),
-        ) as { paneId?: number }
-        : null;
+      const payload = decodeBusPayload<{ paneId?: number }>(event.payload);
       if (!payload?.paneId) return;
       const closedId = BigInt(payload.paneId);
 
@@ -226,7 +222,7 @@ export class TabManager {
           tab.paneIds.splice(idx, 1);
           // Reassign active pane if it was the closed one
           if (tab.activePane === closedId) {
-            tab.activePane = tab.paneIds.length > 0 ? tab.paneIds[0]! : 0n;
+            tab.activePane = tab.paneIds.length > 0 ? tab.paneIds[0]! : null;
           }
         }
       }
@@ -295,15 +291,24 @@ export class TabManager {
 
     this.#activeTab = id;
     // Verify the active pane still exists before focusing
-    const pane = this.#paneManager.getPane(tab.activePane);
-    if (pane) {
-      this.#paneManager.focusPane(tab.activePane);
+    if (tab.activePane !== null) {
+      const pane = this.#paneManager.getPane(tab.activePane);
+      if (pane) {
+        this.#paneManager.focusPane(tab.activePane);
+      } else if (tab.paneIds.length > 0) {
+        // Active pane was stale, fallback to first available
+        tab.activePane = tab.paneIds[0]!;
+        this.#paneManager.focusPane(tab.activePane);
+      } else {
+        tab.activePane = null;
+        this.#log.warn(`focusTab: tab ${id} has no valid panes`);
+      }
     } else if (tab.paneIds.length > 0) {
-      // Fallback to first available pane
+      // No active pane set, derive from paneIds
       tab.activePane = tab.paneIds[0]!;
       this.#paneManager.focusPane(tab.activePane);
     } else {
-      this.#log.warn(`focusTab: tab ${id} has no valid panes`);
+      this.#log.warn(`focusTab: tab ${id} has no panes`);
     }
     this.#eventBus.publish(EventType.TabFocused, { tabId: id });
   }

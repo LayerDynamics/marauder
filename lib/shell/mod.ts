@@ -8,7 +8,7 @@
 import { type EventBus, EventType } from "@marauder/ffi-event-bus";
 import type { BusEvent } from "@marauder/ffi-event-bus";
 import type { Grid } from "@marauder/ffi-grid";
-import { Logger } from "@marauder/dev";
+import { decodeBusPayload, Logger } from "@marauder/dev";
 
 export interface ShellZone {
   type: "prompt" | "command" | "output";
@@ -96,7 +96,7 @@ export class ShellEngine {
     }
   }
 
-  /** Read text from grid between two row/col positions */
+  /** Read text from grid between two row/col positions. Stops at null cells (end of row). */
   #readGridText(
     startRow: number,
     startCol: number,
@@ -106,12 +106,11 @@ export class ShellEngine {
     let text = "";
     for (let r = startRow; r <= endRow; r++) {
       const colStart = r === startRow ? startCol : 0;
-      const colEnd = r === endRow ? endCol : 999; // wide enough for any terminal
-      for (let c = colStart; c < colEnd; c++) {
+      const colLimit = r === endRow ? endCol : Infinity;
+      for (let c = colStart; c < colLimit; c++) {
         const cell = this.#grid.getCell(r, c);
-        if (cell) {
-          text += (cell as { char?: string }).char ?? "";
-        }
+        if (!cell) break; // End of row or out of bounds
+        text += (cell as { char?: string }).char ?? "";
       }
       if (r < endRow) text += "\n";
     }
@@ -176,7 +175,7 @@ export class ShellEngine {
           promptStartRow,
           0,
           commandRow,
-          999,
+          Infinity,
         );
         // Strip prompt prefix — the command is typically on the last line after the prompt char
         const lines = commandText.split("\n");
@@ -279,17 +278,11 @@ export class ShellEngine {
   }
 
   #decodePayload(event: BusEvent): Record<string, unknown> | null {
-    try {
-      if (event.payload && Array.isArray(event.payload)) {
-        const bytes = new Uint8Array(event.payload);
-        const text = new TextDecoder().decode(bytes);
-        return JSON.parse(text) as Record<string, unknown>;
-      }
-      return null;
-    } catch (err) {
-      this.#log.warn("Failed to decode event payload", err);
-      return null;
+    const result = decodeBusPayload(event.payload);
+    if (result === null && event.payload) {
+      this.#log.warn("Failed to decode event payload");
     }
+    return result;
   }
 
   getCwd(): string {

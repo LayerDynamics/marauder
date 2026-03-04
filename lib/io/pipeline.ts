@@ -28,14 +28,23 @@ export interface PipelineConfig {
   configPaths?: ConfigPaths;
 }
 
-const DEFAULT_CONFIG: Required<Omit<PipelineConfig, "env" | "configPaths">> = {
-  shell: Deno.env.get("SHELL") ?? "/bin/zsh",
-  cwd: Deno.cwd(),
+/** Static defaults that don't require permissions. Env-dependent values resolved at create() time. */
+const STATIC_DEFAULTS = {
   rows: 24,
   cols: 80,
   scrollback: 10000,
   logLevel: "info",
-};
+} as const;
+
+function resolveDefaults(): Required<
+  Omit<PipelineConfig, "env" | "configPaths">
+> {
+  return {
+    shell: Deno.env.get("SHELL") ?? "/bin/zsh",
+    cwd: Deno.cwd(),
+    ...STATIC_DEFAULTS,
+  };
+}
 
 /** Encode a Uint8Array as base64 for efficient event serialization */
 function encodeBase64(data: Uint8Array): string {
@@ -69,7 +78,7 @@ export class TerminalPipeline {
     grid: Grid,
     configStore: ConfigStore,
   ) {
-    this.#config = { ...DEFAULT_CONFIG, ...config };
+    this.#config = { ...resolveDefaults(), ...config };
     this.#env = config.env;
     this.eventBus = eventBus;
     this.ptyManager = ptyManager;
@@ -80,7 +89,7 @@ export class TerminalPipeline {
   }
 
   static create(config: Partial<PipelineConfig> = {}): TerminalPipeline {
-    const merged = { ...DEFAULT_CONFIG, ...config };
+    const merged = { ...resolveDefaults(), ...config };
     const eventBus = new EventBus();
     const ptyManager = new PtyManager();
     const parser = new Parser();

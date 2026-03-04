@@ -107,7 +107,7 @@ export class ByteStream implements AsyncIterable<Uint8Array> {
           this.#emptyReads = 0;
           yield data;
         } else {
-          // Exponential backoff on empty reads (1ms → 2ms → 4ms → ... → 50ms cap)
+          // Exponential backoff on empty reads (2ms → 4ms → 8ms → ... → 50ms cap)
           // PTY read should block per FFI docs, so empty reads indicate edge cases
           this.#emptyReads = Math.min(this.#emptyReads + 1, 6);
           const delay = Math.min(1 << this.#emptyReads, 50);

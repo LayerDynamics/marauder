@@ -191,3 +191,24 @@ export function perfMeasure(label: string): number | null {
 export function perfClear(): void {
   perfMarks.clear();
 }
+
+/**
+ * Decode a BusEvent payload (number[] of JSON bytes) into a typed object.
+ * EventBus.publish() JSON-serializes the payload to bytes, and the Rust side
+ * wraps them in BusEvent { payload: Vec<u8> }. On the subscriber side,
+ * serde deserializes Vec<u8> as number[]. This utility reverses that encoding.
+ */
+export function decodeBusPayload<T = Record<string, unknown>>(
+  payload: number[] | unknown,
+): T | null {
+  try {
+    if (payload && Array.isArray(payload)) {
+      const bytes = new Uint8Array(payload as number[]);
+      const text = new TextDecoder().decode(bytes);
+      return JSON.parse(text) as T;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
