@@ -27,7 +27,9 @@ impl ConfigWatcher {
         let mut watcher = notify::recommended_watcher(move |res: Result<NotifyEvent, notify::Error>| {
             match res {
                 Ok(event) => {
-                    let _ = event_tx.blocking_send(event);
+                    if let Err(e) = event_tx.try_send(event) {
+                        tracing::debug!("dropping config change event due to full channel: {e}");
+                    }
                 }
                 Err(e) => {
                     warn!("file watcher error: {e}");

@@ -111,3 +111,12 @@ impl PtyReader {
         self.tx.subscribe()
     }
 }
+
+impl Drop for PtyReader {
+    fn drop(&mut self) {
+        // Send the cancel signal so the reader loop exits on its next iteration.
+        // Note: if the reader is blocked on `read()`, this won't unblock it —
+        // the PTY master must be closed for the read to return EOF/error.
+        let _ = self._cancel.send(true);
+    }
+}

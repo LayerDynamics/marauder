@@ -183,8 +183,8 @@ impl<'a, F: FnMut(TerminalAction)> vte::Perform for MarauderPerformer<'a, F> {
             'n' => self.emit(TerminalAction::DeviceStatusReport(p(0, 0))),
             'c' if intermediates.is_empty() => self.emit(TerminalAction::SendDeviceAttributes),
 
-            // Cursor style (DECSCUSR)
-            ' ' if action == 'q' => self.emit(TerminalAction::SetCursorStyle(p(0, 0))),
+            // Cursor style (DECSCUSR) — CSI Ps SP q
+            'q' if intermediates == [b' '] => self.emit(TerminalAction::SetCursorStyle(p(0, 0))),
 
             // Unrecognized — preserve raw params for extensions
             _ => self.emit(TerminalAction::CsiRaw {

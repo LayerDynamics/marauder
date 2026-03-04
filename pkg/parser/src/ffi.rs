@@ -22,10 +22,10 @@ pub extern "C" fn parser_create() -> *mut ParserHandle {
 
 /// Feed bytes into the parser. The callback is invoked for each parsed action.
 ///
-/// Callback signature: `fn(action_type: u32, data: *const u8, data_len: usize, user_data: *mut c_void)`
+/// Callback signature: `fn(action_json: *const u8, action_json_len: usize, user_data: *mut c_void)`
 ///
-/// The `data` pointer contains JSON-serialized action data. The `action_type` is a discriminant
-/// for the action kind (see `TerminalAction` variants).
+/// The `action_json` pointer contains a JSON-serialized `TerminalAction` (tagged enum).
+/// The action kind is encoded in the JSON as a `"type"` field — there is no separate discriminant.
 ///
 /// # Safety
 /// - `handle` must be a valid pointer from `parser_create`.
