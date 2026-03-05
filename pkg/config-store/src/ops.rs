@@ -23,7 +23,7 @@ impl From<crate::layer::ConfigError> for ConfigOpError {
     }
 }
 
-type ConfigMap = Arc<Mutex<HashMap<u32, ConfigStore>>>;
+type ConfigMap = Arc<Mutex<HashMap<u32, Arc<Mutex<ConfigStore>>>>>;
 type NextConfigId = Arc<Mutex<u32>>;
 
 /// Map of handle → SharedConfigStore for live-shared config stores from the runtime.
@@ -60,11 +60,14 @@ fn with_config<R>(
 
     // Fall back to local config map
     let map = state.borrow::<ConfigMap>().clone();
-    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
-    let store = map
-        .get_mut(&handle)
+    let map_guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    let store_arc = map_guard
+        .get(&handle)
+        .cloned()
         .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?;
-    Ok(f(store))
+    drop(map_guard);
+    let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(f(&mut store))
 }
 
 /// Create a new config store, returns handle ID.
@@ -78,7 +81,7 @@ pub fn op_config_create(state: &mut OpState) -> Result<u32, ConfigOpError> {
     drop(id);
 
     let map = state.borrow::<ConfigMap>().clone();
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, ConfigStore::new());
+    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, Arc::new(Mutex::new(ConfigStore::new())));
     Ok(handle)
 }
 
@@ -114,28 +117,25 @@ pub async fn op_config_load(
     }
     drop(shared_map);
 
-    // Fall back to local map: remove store, do I/O, re-insert
-    let map = {
+    // Fall back to local map: clone the Arc so the store stays in the map during await
+    let store_arc = {
         let st = state.borrow();
-        st.borrow::<ConfigMap>().clone()
+        let map = st.borrow::<ConfigMap>().clone();
+        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&handle)
+            .cloned()
+            .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?
     };
-    let mut store = map.lock().unwrap_or_else(|e| e.into_inner())
-        .remove(&handle)
-        .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?;
 
     let sys = if system.is_empty() { None } else { Some(std::path::PathBuf::from(&system)) };
     let usr = if user.is_empty() { None } else { Some(std::path::PathBuf::from(&user)) };
     let prj = if project.is_empty() { None } else { Some(std::path::PathBuf::from(&project)) };
 
-    let result = tokio::task::spawn_blocking(move || {
-        let r = store.load(sys.as_deref(), usr.as_deref(), prj.as_deref())
-            .map_err(|e| ConfigOpError(e.to_string()));
-        (store, r)
-    }).await.map_err(|e| ConfigOpError(e.to_string()))?;
-
-    let (store, r) = result;
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, store);
-    r
+    tokio::task::spawn_blocking(move || {
+        let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+        store.load(sys.as_deref(), usr.as_deref(), prj.as_deref())
+            .map_err(|e| ConfigOpError(e.to_string()))
+    }).await.map_err(|e| ConfigOpError(e.to_string()))?
 }
 
 /// Get a config value by key, returns JSON or null.
@@ -184,23 +184,20 @@ pub async fn op_config_save(
     }
     drop(shared_map);
 
-    let map = {
+    let store_arc = {
         let st = state.borrow();
-        st.borrow::<ConfigMap>().clone()
+        let map = st.borrow::<ConfigMap>().clone();
+        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&handle)
+            .cloned()
+            .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?
     };
-    let store = map.lock().unwrap_or_else(|e| e.into_inner())
-        .remove(&handle)
-        .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?;
 
-    let result = tokio::task::spawn_blocking(move || {
-        let r = store.save_user_config(std::path::Path::new(&path))
-            .map_err(|e| ConfigOpError(e.to_string()));
-        (store, r)
-    }).await.map_err(|e| ConfigOpError(e.to_string()))?;
-
-    let (store, r) = result;
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, store);
-    r
+    tokio::task::spawn_blocking(move || {
+        let store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+        store.save_user_config(std::path::Path::new(&path))
+            .map_err(|e| ConfigOpError(e.to_string()))
+    }).await.map_err(|e| ConfigOpError(e.to_string()))?
 }
 
 /// Reload config files from disk.
@@ -225,22 +222,19 @@ pub async fn op_config_reload(
     }
     drop(shared_map);
 
-    let map = {
+    let store_arc = {
         let st = state.borrow();
-        st.borrow::<ConfigMap>().clone()
+        let map = st.borrow::<ConfigMap>().clone();
+        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&handle)
+            .cloned()
+            .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?
     };
-    let mut store = map.lock().unwrap_or_else(|e| e.into_inner())
-        .remove(&handle)
-        .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?;
 
-    let result = tokio::task::spawn_blocking(move || {
-        let r = store.reload().map_err(|e| ConfigOpError(e.to_string()));
-        (store, r)
-    }).await.map_err(|e| ConfigOpError(e.to_string()))?;
-
-    let (store, r) = result;
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, store);
-    r
+    tokio::task::spawn_blocking(move || {
+        let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+        store.reload().map_err(|e| ConfigOpError(e.to_string()))
+    }).await.map_err(|e| ConfigOpError(e.to_string()))?
 }
 
 /// Get all config keys.
@@ -310,7 +304,7 @@ mod tests {
         *id = id.checked_add(1).ok_or_else(|| ConfigOpError("config handle ID overflow".to_string()))?;
         drop(id);
         let map = state.borrow::<ConfigMap>().clone();
-        map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, ConfigStore::new());
+        map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, Arc::new(Mutex::new(ConfigStore::new())));
         Ok(handle)
     }
 

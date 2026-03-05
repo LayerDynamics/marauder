@@ -291,9 +291,15 @@ impl Grid {
                 let cols = self.cols();
                 let row = self.cursor.row;
                 let col = self.cursor.col;
+                let end = (col + *n as usize).min(cols);
+                // Clear wide char companions at boundaries
+                self.clear_wide_char_companion(row, col);
+                if end < cols {
+                    self.clear_wide_char_companion(row, end);
+                }
                 let screen = self.active_screen_mut();
                 if row < screen.rows.len() {
-                    for c in col..(col + *n as usize).min(cols) {
+                    for c in col..end {
                         screen.rows[row][c] = Cell::default();
                     }
                 }
@@ -325,6 +331,11 @@ impl Grid {
                 let cols = self.cols();
                 let row = self.cursor.row;
                 let col = self.cursor.col;
+                // Clear wide char at insertion point and at the right edge that will be pushed off
+                self.clear_wide_char_companion(row, col);
+                if cols > 0 {
+                    self.clear_wide_char_companion(row, cols - 1);
+                }
                 let screen = self.active_screen_mut();
                 if row < screen.rows.len() && col < cols {
                     let n = (*n as usize).min(cols - col);
@@ -342,13 +353,18 @@ impl Grid {
                 let cols = self.cols();
                 let row = self.cursor.row;
                 let col = self.cursor.col;
+                // Clear wide char at deletion point and at the boundary that will shift in
+                self.clear_wide_char_companion(row, col);
+                let n_clamped = (*n as usize).min(cols.saturating_sub(col));
+                if col + n_clamped < cols {
+                    self.clear_wide_char_companion(row, col + n_clamped);
+                }
                 let screen = self.active_screen_mut();
                 if row < screen.rows.len() && col < cols {
-                    let n = (*n as usize).min(cols - col);
-                    for c in col..cols - n {
-                        screen.rows[row][c] = screen.rows[row][c + n];
+                    for c in col..cols - n_clamped {
+                        screen.rows[row][c] = screen.rows[row][c + n_clamped];
                     }
-                    for c in cols - n..cols {
+                    for c in cols - n_clamped..cols {
                         screen.rows[row][c] = Cell::default();
                     }
                 }
@@ -530,6 +546,19 @@ impl Grid {
         let cols = self.cols();
         let cursor_row = self.cursor.row;
         let cursor_col = self.cursor.col;
+        // Clear wide char companions at cursor boundary
+        match mode {
+            EraseMode::ToEnd => {
+                self.clear_wide_char_companion(cursor_row, cursor_col);
+            }
+            EraseMode::ToStart => {
+                let end = cursor_col.min(cols.saturating_sub(1));
+                if end + 1 < cols {
+                    self.clear_wide_char_companion(cursor_row, end + 1);
+                }
+            }
+            EraseMode::All => {} // full screen erase, no orphans possible
+        }
         let screen = self.active_screen_mut();
         match mode {
             EraseMode::ToEnd => {
@@ -565,6 +594,19 @@ impl Grid {
         let cols = self.cols();
         let row = self.cursor.row;
         let col = self.cursor.col;
+        // Clear wide char companions at erase boundaries
+        match mode {
+            EraseMode::ToEnd => {
+                self.clear_wide_char_companion(row, col);
+            }
+            EraseMode::ToStart => {
+                let end = col.min(cols.saturating_sub(1));
+                if end + 1 < cols {
+                    self.clear_wide_char_companion(row, end + 1);
+                }
+            }
+            EraseMode::All => {} // full row erase, no orphans possible
+        }
         let screen = self.active_screen_mut();
         if row >= screen.rows.len() { return; }
         match mode {
@@ -823,6 +865,68 @@ mod tests {
         // Right half spacer should be cleared
         assert_eq!(screen.rows[0][1].c, ' ');
         assert_eq!(screen.rows[0][1].width, 1);
+    }
+
+    #[test]
+    fn test_erase_chars_splits_wide_char() {
+        let mut grid = Grid::new(24, 80);
+        // Print 'A' then wide '中' at col 1-2
+        grid.apply_action(&TerminalAction::Print('A'));
+        grid.apply_action(&TerminalAction::Print('中'));
+        // Erase 1 char starting at col 1 (left half of wide char)
+        grid.cursor.col = 1;
+        grid.apply_action(&TerminalAction::EraseCharacters(1));
+        let screen = grid.active_screen();
+        // Left half erased
+        assert_eq!(screen.rows[0][1].c, ' ');
+        assert_eq!(screen.rows[0][1].width, 1);
+        // Right half (spacer) should also be cleared
+        assert_eq!(screen.rows[0][2].c, ' ');
+        assert_eq!(screen.rows[0][2].width, 1);
+    }
+
+    #[test]
+    fn test_delete_chars_splits_wide_char() {
+        let mut grid = Grid::new(24, 80);
+        // Print 'A' then wide '中' at col 1-2, then 'B' at col 3
+        grid.apply_action(&TerminalAction::Print('A'));
+        grid.apply_action(&TerminalAction::Print('中'));
+        grid.apply_action(&TerminalAction::Print('B'));
+        // Delete 1 char at col 1 (left half of wide char)
+        grid.cursor.col = 1;
+        grid.apply_action(&TerminalAction::DeleteCharacters(1));
+        let screen = grid.active_screen();
+        // The spacer (col 2) should have been cleared before shift
+        // After delete: col 1 should not be a width-0 spacer
+        assert_ne!(screen.rows[0][1].width, 0, "spacer should not remain after delete");
+    }
+
+    #[test]
+    fn test_insert_chars_splits_wide_char() {
+        let mut grid = Grid::new(24, 10);
+        // Print wide '中' at col 0-1
+        grid.apply_action(&TerminalAction::Print('中'));
+        // Insert 1 char at col 1 (right half / spacer of wide char)
+        grid.cursor.col = 1;
+        grid.apply_action(&TerminalAction::InsertCharacters(1));
+        let screen = grid.active_screen();
+        // Left half should be cleared since its spacer was displaced
+        assert_eq!(screen.rows[0][0].c, ' ');
+        assert_eq!(screen.rows[0][0].width, 1);
+    }
+
+    #[test]
+    fn test_erase_line_to_end_splits_wide_char() {
+        let mut grid = Grid::new(24, 80);
+        // Print wide '中' at col 0-1
+        grid.apply_action(&TerminalAction::Print('中'));
+        // Erase to end starting at col 1 (right half of wide char)
+        grid.cursor.col = 1;
+        grid.apply_action(&TerminalAction::EraseInLine(EraseMode::ToEnd));
+        let screen = grid.active_screen();
+        // Left half should be cleared since right half was erased
+        assert_eq!(screen.rows[0][0].c, ' ');
+        assert_eq!(screen.rows[0][0].width, 1);
     }
 
     #[test]

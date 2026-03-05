@@ -124,7 +124,10 @@ pub unsafe extern "C" fn event_bus_publish(
         vec![]
     } else {
         match serde_json::from_slice::<serde_json::Value>(payload_slice) {
-            Ok(v) => serde_json::to_vec(&v).unwrap_or_default(),
+            Ok(v) => match serde_json::to_vec(&v) {
+                Ok(bytes) => bytes,
+                Err(_) => return 0,
+            },
             Err(_) => return 0,
         }
     };

@@ -23,7 +23,7 @@ impl From<crate::error::RuntimeError> for RuntimeOpError {
     }
 }
 
-type RuntimeMap = Arc<Mutex<HashMap<u32, MarauderRuntime>>>;
+type RuntimeMap = Arc<Mutex<HashMap<u32, Arc<Mutex<MarauderRuntime>>>>>;
 type NextRuntimeId = Arc<Mutex<u32>>;
 
 /// Tracks whether the primary runtime is attached (managed by Rust, not JS).
@@ -48,11 +48,14 @@ fn with_runtime<R>(
     f: impl FnOnce(&mut MarauderRuntime) -> R,
 ) -> Result<R, RuntimeOpError> {
     let map = state.borrow::<RuntimeMap>().clone();
-    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
-    let rt = map
-        .get_mut(&handle)
+    let map = map.lock().unwrap_or_else(|e| e.into_inner());
+    let rt_arc = map
+        .get(&handle)
+        .cloned()
         .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?;
-    Ok(f(rt))
+    drop(map);
+    let mut rt = rt_arc.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(f(&mut rt))
 }
 
 // ── impl functions (called by #[op2] wrappers and by tests) ──────────────────
@@ -66,7 +69,7 @@ fn runtime_create_impl(state: &mut OpState) -> Result<u32, RuntimeOpError> {
 
     let map = state.borrow::<RuntimeMap>().clone();
     map.lock().unwrap_or_else(|e| e.into_inner())
-        .insert(handle, MarauderRuntime::new(RuntimeConfig::default()));
+        .insert(handle, Arc::new(Mutex::new(MarauderRuntime::new(RuntimeConfig::default()))));
     Ok(handle)
 }
 
@@ -124,6 +127,8 @@ fn runtime_destroy_impl(state: &mut OpState, handle: u32) -> Result<(), RuntimeO
     map.lock().unwrap_or_else(|e| e.into_inner())
         .remove(&handle)
         .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?;
+    // The Arc<Mutex<MarauderRuntime>> is dropped here, releasing the runtime
+    // if no other references exist.
     Ok(())
 }
 
@@ -150,17 +155,16 @@ pub async fn op_runtime_boot(
     state: Rc<RefCell<OpState>>,
     #[smi] handle: u32,
 ) -> Result<(), RuntimeOpError> {
-    let map = {
+    let rt_arc = {
         let state = state.borrow();
-        state.borrow::<RuntimeMap>().clone()
+        let map = state.borrow::<RuntimeMap>().clone();
+        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&handle)
+            .cloned()
+            .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?
     };
-    let mut rt = map
-        .lock().unwrap_or_else(|e| e.into_inner())
-        .remove(&handle)
-        .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?;
-    let result = rt.boot().await.map_err(RuntimeOpError::from);
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, rt);
-    result
+    let mut rt = rt_arc.lock().unwrap_or_else(|e| e.into_inner());
+    rt.boot().await.map_err(RuntimeOpError::from)
 }
 
 /// Shutdown the runtime (async).
@@ -169,17 +173,16 @@ pub async fn op_runtime_shutdown(
     state: Rc<RefCell<OpState>>,
     #[smi] handle: u32,
 ) -> Result<(), RuntimeOpError> {
-    let map = {
+    let rt_arc = {
         let state = state.borrow();
-        state.borrow::<RuntimeMap>().clone()
+        let map = state.borrow::<RuntimeMap>().clone();
+        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&handle)
+            .cloned()
+            .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?
     };
-    let mut rt = map
-        .lock().unwrap_or_else(|e| e.into_inner())
-        .remove(&handle)
-        .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?;
-    let result = rt.shutdown().await.map_err(RuntimeOpError::from);
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, rt);
-    result
+    let mut rt = rt_arc.lock().unwrap_or_else(|e| e.into_inner());
+    rt.shutdown().await.map_err(RuntimeOpError::from)
 }
 
 /// Create a new pane, returns pane ID.
