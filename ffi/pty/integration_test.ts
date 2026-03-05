@@ -36,8 +36,23 @@ async function readUntil(
           return output;
         }
       }
-    } catch {
-      // read may fail briefly if no data available yet
+    } catch (err: unknown) {
+      const error: any = err;
+      const code = error?.code;
+      const message = typeof error?.message === "string" ? error.message : "";
+
+      const isTransient =
+        code === "EAGAIN" ||
+        code === "EWOULDBLOCK" ||
+        (typeof message === "string" &&
+          (message.includes("EAGAIN") || message.includes("EWOULDBLOCK")));
+
+      if (!isTransient) {
+        // Unexpected failure: surface it so tests fail loudly instead of timing out.
+        throw err;
+      }
+
+      // Transient “no data yet” error – ignore and let the loop retry.
     }
     await sleep(50);
   }
