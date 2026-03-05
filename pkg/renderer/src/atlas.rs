@@ -34,6 +34,8 @@ pub struct GlyphAtlas {
     cell_width: f32,
     cell_height: f32,
     font_size: f32,
+    /// Font ascent in pixels (distance from baseline to top of cell).
+    ascent: f32,
     /// Whether the atlas texture needs re-upload.
     dirty: bool,
 }
@@ -41,13 +43,23 @@ pub struct GlyphAtlas {
 impl GlyphAtlas {
     /// Create a new atlas with the given font configuration.
     pub fn new(font_size: f32, line_height: f32) -> Self {
-        let font_system = FontSystem::new();
+        let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let pixels = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE) as usize];
 
-        // Estimate cell size from font metrics
         let cell_height = (font_size * line_height).ceil();
         let cell_width = (font_size * 0.6).ceil(); // Monospace approximation
+
+        // Derive ascent from font metrics using a probe buffer
+        let metrics = Metrics::new(font_size, cell_height);
+        let mut probe = Buffer::new(&mut font_system, metrics);
+        let attrs = Attrs::new();
+        probe.set_text(&mut font_system, "M", attrs, Shaping::Advanced);
+        probe.shape_until_scroll(&mut font_system, false);
+        let ascent = probe.layout_runs()
+            .next()
+            .map(|run| run.line_y)
+            .unwrap_or(cell_height * 0.8);
 
         Self {
             font_system,
@@ -60,6 +72,7 @@ impl GlyphAtlas {
             cell_width,
             cell_height,
             font_size,
+            ascent,
             dirty: true,
         }
     }
@@ -67,6 +80,11 @@ impl GlyphAtlas {
     /// Get the cell dimensions.
     pub fn cell_size(&self) -> (f32, f32) {
         (self.cell_width, self.cell_height)
+    }
+
+    /// Get the font ascent in pixels (baseline position from top of cell).
+    pub fn ascent(&self) -> f32 {
+        self.ascent
     }
 
     /// Atlas texture size.

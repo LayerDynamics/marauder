@@ -1,5 +1,6 @@
 /**
  * Tab bar component — vanilla TS, manages #tab-bar DOM element.
+ * Uses event delegation on the tab list for efficient click handling.
  */
 
 export interface Tab {
@@ -20,6 +21,27 @@ export class TabBar {
     this.tabsEl = document.createElement("div");
     this.tabsEl.className = "tab-list";
     this.container.appendChild(this.tabsEl);
+
+    // Event delegation: single listener handles all tab clicks
+    this.tabsEl.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement;
+      const tabEl = target.closest<HTMLElement>(".tab");
+      if (!tabEl) return;
+
+      const id = Number(tabEl.dataset.tabId);
+      if (Number.isNaN(id)) return;
+
+      if (target.closest(".tab-close-btn")) {
+        e.stopPropagation();
+        this.container.dispatchEvent(
+          new CustomEvent("tab-close", { bubbles: true, detail: { id } })
+        );
+      } else {
+        this.container.dispatchEvent(
+          new CustomEvent("tab-select", { bubbles: true, detail: { id } })
+        );
+      }
+    });
 
     const newBtn = document.createElement("button");
     newBtn.className = "tab-new-btn";
@@ -68,27 +90,17 @@ export class TabBar {
     for (const [id, tab] of this.tabs) {
       const tabEl = document.createElement("div");
       tabEl.className = "tab" + (id === this.activeTabId ? " tab-active" : "");
+      tabEl.dataset.tabId = id.toString();
 
       const titleEl = document.createElement("span");
       titleEl.className = "tab-title";
       titleEl.textContent = tab.title;
-      titleEl.addEventListener("click", () => {
-        this.container.dispatchEvent(
-          new CustomEvent("tab-select", { bubbles: true, detail: { id } })
-        );
-      });
       tabEl.appendChild(titleEl);
 
       const closeBtn = document.createElement("button");
       closeBtn.className = "tab-close-btn";
       closeBtn.textContent = "\u00d7";
       closeBtn.title = "Close tab";
-      closeBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.container.dispatchEvent(
-          new CustomEvent("tab-close", { bubbles: true, detail: { id } })
-        );
-      });
       tabEl.appendChild(closeBtn);
 
       this.tabsEl.appendChild(tabEl);

@@ -98,7 +98,7 @@ pub fn run() {
                             tracing::info!(pane_id, "Initial pane created");
                             if let Some(pipeline) = runtime.pipeline(pane_id) {
                                 let grid = Arc::clone(&pipeline.grid);
-                                *active_grid_for_thread.lock().unwrap() = Some(grid);
+                                *active_grid_for_thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(grid);
                             }
                         }
                         Err(e) => {
@@ -117,7 +117,7 @@ pub fn run() {
                     ).await {
                         Ok(renderer) => {
                             tracing::info!("wgpu renderer initialized");
-                            *renderer_for_thread.lock().unwrap() = Some(renderer);
+                            *renderer_for_thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(renderer);
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Failed to initialize wgpu renderer");
@@ -152,9 +152,9 @@ pub fn run() {
                         // Drain queued signals (coalesce)
                         while rx.try_recv().is_ok() {}
 
-                        let grid = active_grid_for_render.lock().unwrap().clone();
+                        let grid = active_grid_for_render.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         if let Some(ref grid) = grid {
-                            let mut rend = renderer_for_thread.lock().unwrap();
+                            let mut rend = renderer_for_thread.lock().unwrap_or_else(|e| e.into_inner());
                             if let Some(ref mut renderer) = *rend {
                                 match renderer.render_frame(grid) {
                                     Ok(()) => {}

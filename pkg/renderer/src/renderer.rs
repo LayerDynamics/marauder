@@ -423,6 +423,7 @@ impl Renderer {
         let rows = grid.rows();
         let cols = grid.cols();
         let (cw, ch) = self.cell_size();
+        let ascent = self.atlas.ascent();
         let screen = grid.active_screen();
 
         let default_bg = self.config.theme.background;
@@ -461,7 +462,7 @@ impl Renderer {
                             size: glyph.pixel_size,
                             fg_color,
                             uv_rect: glyph.uv,
-                            glyph_offset: [glyph.offset[0], glyph.offset[1] + ch * 0.8],
+                            glyph_offset: [glyph.offset[0], glyph.offset[1] + ascent],
                         });
                     }
                 }
