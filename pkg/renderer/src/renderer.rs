@@ -383,12 +383,12 @@ impl Renderer {
 
     /// Get a reference to the wgpu device.
     pub fn device(&self) -> &wgpu::Device {
-        &self.device
+        &*self.device
     }
 
     /// Get a reference to the wgpu queue.
     pub fn queue(&self) -> &wgpu::Queue {
-        &self.queue
+        &*self.queue
     }
 
     /// Get an Arc-cloned device handle (for sharing with compute).

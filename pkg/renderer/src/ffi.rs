@@ -13,11 +13,6 @@ use crate::types::{CursorStyle, RendererConfig, ThemeColors};
 /// GPU state is likely corrupt after a panic — continuing would risk GPU hangs,
 /// validation errors, or rendering garbage. Callers should treat this as fatal
 /// and destroy + recreate the renderer.
-/// Error code returned when the renderer mutex is poisoned (prior panic).
-///
-/// GPU state is likely corrupt after a panic — continuing would risk GPU hangs,
-/// validation errors, or rendering garbage. Callers should treat this as fatal
-/// and destroy + recreate the renderer.
 const ERR_POISONED: i32 = -99;
 
 /// Lock the renderer mutex, returning `ERR_POISONED` (via early return) if poisoned.
@@ -306,45 +301,55 @@ pub unsafe extern "C" fn renderer_resize_surface(
 
 /// Get cell size in pixels.
 ///
+/// Writes two little-endian f32 values (width, height) into the provided
+/// byte buffers. Each buffer must be at least 4 bytes.
+///
 /// # Safety
 /// - `handle` must be a valid pointer from `renderer_create`.
-/// - `out_width` and `out_height` must be valid writable pointers.
+/// - `out_width_buf` must point to at least 4 writable bytes.
+/// - `out_height_buf` must point to at least 4 writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn renderer_get_cell_size(
     handle: *mut RendererHandle,
-    out_width: *mut f32,
-    out_height: *mut f32,
+    out_width_buf: *mut u8,
+    out_height_buf: *mut u8,
 ) -> i32 {
-    if handle.is_null() || out_width.is_null() || out_height.is_null() {
+    if handle.is_null() || out_width_buf.is_null() || out_height_buf.is_null() {
         return -1;
     }
     let h = &*handle;
     let r = lock_or_err!(h);
     let (w, h_val) = r.cell_size();
-    *out_width = w;
-    *out_height = h_val;
+    // SAFETY: Caller guarantees at least 4 bytes in each buffer.
+    std::ptr::copy_nonoverlapping(w.to_le_bytes().as_ptr(), out_width_buf, 4);
+    std::ptr::copy_nonoverlapping(h_val.to_le_bytes().as_ptr(), out_height_buf, 4);
     0
 }
 
 /// Get grid dimensions (rows, cols) for current surface size.
 ///
+/// Writes two little-endian u16 values (rows, cols) into the provided
+/// byte buffers. Each buffer must be at least 2 bytes.
+///
 /// # Safety
 /// - `handle` must be a valid pointer from `renderer_create`.
-/// - `out_rows` and `out_cols` must be valid writable pointers.
+/// - `out_rows_buf` must point to at least 2 writable bytes.
+/// - `out_cols_buf` must point to at least 2 writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn renderer_get_grid_dimensions(
     handle: *mut RendererHandle,
-    out_rows: *mut u16,
-    out_cols: *mut u16,
+    out_rows_buf: *mut u8,
+    out_cols_buf: *mut u8,
 ) -> i32 {
-    if handle.is_null() || out_rows.is_null() || out_cols.is_null() {
+    if handle.is_null() || out_rows_buf.is_null() || out_cols_buf.is_null() {
         return -1;
     }
     let h = &*handle;
     let r = lock_or_err!(h);
     let (rows, cols) = r.grid_dimensions();
-    *out_rows = rows;
-    *out_cols = cols;
+    // SAFETY: Caller guarantees at least 2 bytes in each buffer.
+    std::ptr::copy_nonoverlapping(rows.to_le_bytes().as_ptr(), out_rows_buf, 2);
+    std::ptr::copy_nonoverlapping(cols.to_le_bytes().as_ptr(), out_cols_buf, 2);
     0
 }
 

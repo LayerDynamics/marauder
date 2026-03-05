@@ -162,6 +162,15 @@ const encoder = new TextEncoder();
 /** Error code returned by Rust when the renderer mutex is poisoned. */
 const ERR_POISONED = -99;
 
+/** Return code from `renderer_render_frame` when headless (no surface). */
+const RENDER_HEADLESS = 1;
+
+/** Return code from `renderer_render_frame` when the surface is lost. */
+const RENDER_SURFACE_LOST = -2;
+
+/** Return code from `renderer_render_frame` on GPU out-of-memory. */
+const RENDER_OOM = -3;
+
 /** Thrown when the renderer's internal mutex is poisoned (prior panic). */
 export class RendererPoisonedError extends Error {
   constructor(fn_name: string) {
@@ -170,6 +179,22 @@ export class RendererPoisonedError extends Error {
         `Destroy this instance and create a new one.`,
     );
     this.name = "RendererPoisonedError";
+  }
+}
+
+/** Thrown when the wgpu surface is lost and needs reconfiguration. */
+export class SurfaceLostError extends Error {
+  constructor() {
+    super("renderer_render_frame: surface lost — resize or reconfigure needed");
+    this.name = "SurfaceLostError";
+  }
+}
+
+/** Thrown when the GPU runs out of memory. */
+export class GpuOutOfMemoryError extends Error {
+  constructor() {
+    super("renderer_render_frame: GPU out of memory");
+    this.name = "GpuOutOfMemoryError";
   }
 }
 
@@ -254,11 +279,28 @@ export class Renderer {
     checkResult(result, "renderer_update_cells");
   }
 
-  /** Render a frame (no-op for headless renderer). */
-  renderFrame(): void {
+  /**
+   * Render a frame. Returns `false` for headless (no surface to present to),
+   * `true` on successful present.
+   *
+   * @throws {SurfaceLostError} if the surface is lost (caller should resize/reconfigure).
+   * @throws {GpuOutOfMemoryError} if the GPU is out of memory.
+   * @throws {RendererPoisonedError} if the renderer mutex is poisoned.
+   */
+  renderFrame(): boolean {
     this.#ensureOpen();
     const result = lib.symbols.renderer_render_frame(this.#handle);
+    if (result === RENDER_HEADLESS) {
+      return false; // headless — benign no-op
+    }
+    if (result === RENDER_SURFACE_LOST) {
+      throw new SurfaceLostError();
+    }
+    if (result === RENDER_OOM) {
+      throw new GpuOutOfMemoryError();
+    }
     checkResult(result, "renderer_render_frame");
+    return true;
   }
 
   /** Resize the rendering surface. */
