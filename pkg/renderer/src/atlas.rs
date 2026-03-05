@@ -1,7 +1,7 @@
 //! Glyph atlas: rasterizes glyphs via cosmic-text, packs into GPU texture.
 
 use std::collections::HashMap;
-use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
 use tracing;
 
 /// Glyph UV coordinates in the atlas texture.
@@ -34,6 +34,8 @@ pub struct GlyphAtlas {
     cell_width: f32,
     cell_height: f32,
     font_size: f32,
+    /// Font family name (e.g. "JetBrains Mono", "monospace").
+    font_family: String,
     /// Font ascent in pixels (distance from baseline to top of cell).
     ascent: f32,
     /// Whether the atlas texture needs re-upload.
@@ -42,7 +44,7 @@ pub struct GlyphAtlas {
 
 impl GlyphAtlas {
     /// Create a new atlas with the given font configuration.
-    pub fn new(font_size: f32, line_height: f32) -> Self {
+    pub fn new(font_family: &str, font_size: f32, line_height: f32) -> Self {
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let pixels = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE) as usize];
@@ -50,10 +52,12 @@ impl GlyphAtlas {
         let cell_height = (font_size * line_height).ceil();
         let cell_width = (font_size * 0.6).ceil(); // Monospace approximation
 
+        let family = Self::parse_family(font_family);
+
         // Derive ascent from font metrics using a probe buffer
         let metrics = Metrics::new(font_size, cell_height);
         let mut probe = Buffer::new(&mut font_system, metrics);
-        let attrs = Attrs::new();
+        let attrs = Attrs::new().family(family);
         probe.set_text(&mut font_system, "M", attrs, Shaping::Advanced);
         probe.shape_until_scroll(&mut font_system, false);
         let ascent = probe.layout_runs()
@@ -72,8 +76,21 @@ impl GlyphAtlas {
             cell_width,
             cell_height,
             font_size,
+            font_family: font_family.to_string(),
             ascent,
             dirty: true,
+        }
+    }
+
+    /// Parse a family name string into a cosmic-text `Family` variant.
+    fn parse_family(name: &str) -> Family<'_> {
+        match name.to_lowercase().as_str() {
+            "monospace" | "" => Family::Monospace,
+            "serif" => Family::Serif,
+            "sans-serif" | "sans serif" => Family::SansSerif,
+            "cursive" => Family::Cursive,
+            "fantasy" => Family::Fantasy,
+            _ => Family::Name(name),
         }
     }
 
@@ -126,7 +143,8 @@ impl GlyphAtlas {
         let metrics = Metrics::new(self.font_size, self.cell_height);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
 
-        let attrs = Attrs::new();
+        let family = Self::parse_family(&self.font_family);
+        let attrs = Attrs::new().family(family);
         buffer.set_text(&mut self.font_system, &c.to_string(), attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
