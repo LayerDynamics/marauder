@@ -2922,10 +2922,12 @@ dependencies = [
  "cosmic-text",
  "marauder-event-bus",
  "marauder-grid",
+ "pollster",
  "raw-window-handle",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "wgpu",
 ]
