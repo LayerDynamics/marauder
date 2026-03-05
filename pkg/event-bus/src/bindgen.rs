@@ -26,7 +26,10 @@ fn event_bus_bindgen_publish(handle_id: u32, event_type: u32, payload_json: &str
         Ok(et) => et,
         Err(_) => return 0,
     };
-    let payload = payload_json.as_bytes().to_vec();
+    let payload = match serde_json::from_str::<serde_json::Value>(payload_json) {
+        Ok(v) => serde_json::to_vec(&v).unwrap_or_default(),
+        Err(_) => return 0,
+    };
     let event = Event::new(et, payload);
     bus.publish(event);
     1

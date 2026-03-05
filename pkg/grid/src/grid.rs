@@ -1,5 +1,7 @@
 use std::fmt;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::cell::{Cell, CellAttributes, Color};
 use crate::screen::Screen;
 use marauder_parser::actions::*;
@@ -324,7 +326,7 @@ impl Grid {
                 let row = self.cursor.row;
                 let col = self.cursor.col;
                 let screen = self.active_screen_mut();
-                if row < screen.rows.len() {
+                if row < screen.rows.len() && col < cols {
                     let n = (*n as usize).min(cols - col);
                     // Shift cells right
                     for c in (col + n..cols).rev() {
@@ -341,7 +343,7 @@ impl Grid {
                 let row = self.cursor.row;
                 let col = self.cursor.col;
                 let screen = self.active_screen_mut();
-                if row < screen.rows.len() {
+                if row < screen.rows.len() && col < cols {
                     let n = (*n as usize).min(cols - col);
                     for c in col..cols - n {
                         screen.rows[row][c] = screen.rows[row][c + n];
@@ -430,17 +432,37 @@ impl Grid {
     fn action_print(&mut self, c: char) {
         let rows = self.rows();
         let cols = self.cols();
-        // Auto-wrap
+        let char_width = c.width().unwrap_or(1).max(1) as u8;
+
+        // Wide char at last column: wrap BEFORE printing so it doesn't split across lines
+        if char_width == 2 && self.cursor.col == cols.saturating_sub(1) {
+            // Erase the last column (it becomes a blank space) and wrap
+            if self.cursor.row < rows {
+                let row = self.cursor.row;
+                let screen = self.active_screen_mut();
+                screen.rows[row][cols - 1] = Cell::default();
+                self.mark_dirty(row);
+            }
+            self.cursor.col = 0;
+            self.action_linefeed();
+        }
+
+        // Standard auto-wrap: cursor past the right edge
         if self.cursor.col >= cols {
             self.cursor.col = 0;
             self.action_linefeed();
         }
+
         let row = self.cursor.row;
         let col = self.cursor.col;
         let fg = self.cursor.fg;
         let bg = self.cursor.bg;
         let attrs = self.cursor.attrs;
+
         if row < rows {
+            // Clear companion cell if overwriting a wide character's left or right half
+            self.clear_wide_char_companion(row, col);
+
             let screen = self.active_screen_mut();
             screen.rows[row][col] = Cell {
                 c,
@@ -448,11 +470,46 @@ impl Grid {
                 bg,
                 attrs,
                 hyperlink_id: None,
-                width: 1,
+                width: char_width,
             };
+
+            // Place spacer cell for wide characters
+            if char_width == 2 && col + 1 < cols {
+                // Clear companion if overwriting the spacer position too
+                self.clear_wide_char_companion(row, col + 1);
+                let screen = self.active_screen_mut();
+                screen.rows[row][col + 1] = Cell {
+                    c: ' ',
+                    fg,
+                    bg,
+                    attrs,
+                    hyperlink_id: None,
+                    width: 0, // spacer/continuation cell
+                };
+            }
+
             self.mark_dirty(row);
         }
-        self.cursor.col += 1;
+
+        self.cursor.col += char_width as usize;
+    }
+
+    /// When overwriting a cell that is part of a wide character, clear the companion cell
+    /// to prevent rendering corruption (orphaned half of a wide char).
+    fn clear_wide_char_companion(&mut self, row: usize, col: usize) {
+        let cols = self.cols();
+        let screen = self.active_screen_mut();
+        if row >= screen.rows.len() || col >= cols {
+            return;
+        }
+        let cell = screen.rows[row][col];
+        if cell.width == 2 && col + 1 < cols {
+            // Overwriting the left half of a wide char: clear the right (spacer) half
+            screen.rows[row][col + 1] = Cell::default();
+        } else if cell.width == 0 && col > 0 {
+            // Overwriting the right (spacer) half: clear the left (primary) half
+            screen.rows[row][col - 1] = Cell::default();
+        }
     }
 
     fn action_linefeed(&mut self) {
@@ -717,5 +774,71 @@ mod tests {
         }
         // F should be on row 1, col 0
         assert_eq!(grid.active_screen().rows[1][0].c, 'F');
+    }
+
+    #[test]
+    fn test_wide_char_cjk() {
+        let mut grid = Grid::new(24, 80);
+        // '中' is a CJK character with display width 2
+        grid.apply_action(&TerminalAction::Print('中'));
+        let screen = grid.active_screen();
+        // Primary cell should have the character with width 2
+        assert_eq!(screen.rows[0][0].c, '中');
+        assert_eq!(screen.rows[0][0].width, 2, "wide char should have width 2");
+        // Spacer cell at col 1 should have width 0
+        assert_eq!(screen.rows[0][1].width, 0, "spacer cell should have width 0");
+        // Cursor should advance by 2
+        assert_eq!(grid.cursor.col, 2);
+    }
+
+    #[test]
+    fn test_wide_char_wrap_at_last_column() {
+        // Grid with 5 columns. Place cursor at col 4 (last col) and print wide char.
+        // Wide char needs 2 cols, so it should wrap to next line.
+        let mut grid = Grid::new(3, 5);
+        for c in "ABCD".chars() {
+            grid.apply_action(&TerminalAction::Print(c));
+        }
+        assert_eq!(grid.cursor.col, 4);
+        // Now print a wide char — should wrap
+        grid.apply_action(&TerminalAction::Print('中'));
+        assert_eq!(grid.cursor.row, 1, "wide char should wrap to next row");
+        assert_eq!(grid.cursor.col, 2, "cursor should be at col 2 after wide char");
+        assert_eq!(grid.active_screen().rows[1][0].c, '中');
+        assert_eq!(grid.active_screen().rows[1][0].width, 2);
+        assert_eq!(grid.active_screen().rows[1][1].width, 0);
+    }
+
+    #[test]
+    fn test_overwrite_wide_char_left_half() {
+        let mut grid = Grid::new(24, 80);
+        // Print wide char at col 0-1
+        grid.apply_action(&TerminalAction::Print('中'));
+        // Move cursor back to col 0 and overwrite left half
+        grid.cursor.col = 0;
+        grid.apply_action(&TerminalAction::Print('A'));
+        let screen = grid.active_screen();
+        assert_eq!(screen.rows[0][0].c, 'A');
+        assert_eq!(screen.rows[0][0].width, 1);
+        // Right half spacer should be cleared
+        assert_eq!(screen.rows[0][1].c, ' ');
+        assert_eq!(screen.rows[0][1].width, 1);
+    }
+
+    #[test]
+    fn test_overwrite_wide_char_right_half() {
+        let mut grid = Grid::new(24, 80);
+        // Print wide char at col 0-1
+        grid.apply_action(&TerminalAction::Print('中'));
+        // Move cursor to col 1 and overwrite right half (spacer)
+        grid.cursor.col = 1;
+        grid.apply_action(&TerminalAction::Print('B'));
+        let screen = grid.active_screen();
+        // Left half (primary) should be cleared
+        assert_eq!(screen.rows[0][0].c, ' ');
+        assert_eq!(screen.rows[0][0].width, 1);
+        // Col 1 should now be 'B'
+        assert_eq!(screen.rows[0][1].c, 'B');
+        assert_eq!(screen.rows[0][1].width, 1);
     }
 }

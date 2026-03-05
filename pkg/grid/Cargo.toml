@@ -16,3 +16,6 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 bitflags = { workspace = true }
 deno_bindgen = { workspace = true }
+deno_core = { workspace = true }
+deno_error = { workspace = true }
+unicode-width = { workspace = true }

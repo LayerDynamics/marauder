@@ -55,6 +55,16 @@ fn renderer_resize(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize tracing subscriber so tracing::* macros produce output.
+    // Respects RUST_LOG env var (e.g. RUST_LOG=marauder=debug,wgpu=warn).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("marauder=info,warn")),
+        )
+        .with_target(true)
+        .init();
+
     let event_bus = bus::create_shared();
     let webview_subs = event_bridge::WebviewSubscriptions::new(event_bus.clone());
 
@@ -132,14 +142,24 @@ pub fn run() {
                         }
                     }
 
-                    // Listen for new panes to register their grids
+                    // Wrap runtime in Arc<Mutex<>> so the PaneCreated handler can
+                    // access pipeline grids (the real ones connected to PTY data).
+                    let runtime = Arc::new(Mutex::new(runtime));
+
+                    // Listen for new panes to register their grids from the runtime pipeline
                     let pane_grids_for_new = pane_grids_for_thread.clone();
+                    let runtime_for_pane_handler = Arc::clone(&runtime);
                     event_bus_for_thread.subscribe(EventType::PaneCreated, move |event: &Event| {
                         if let Ok(pane_id) = event.payload_as::<PaneId>() {
-                            let grid = Arc::new(Mutex::new(Grid::new(24, 80)));
-                            pane_grids_for_new.lock().unwrap_or_else(|e| e.into_inner())
-                                .insert(pane_id, grid);
-                            tracing::debug!(pane_id, "Registered grid for new pane");
+                            let rt = runtime_for_pane_handler.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(pipeline) = rt.pipeline(pane_id) {
+                                let grid = Arc::clone(&pipeline.grid);
+                                pane_grids_for_new.lock().unwrap_or_else(|e| e.into_inner())
+                                    .insert(pane_id, grid);
+                                tracing::debug!(pane_id, "Registered pipeline grid for new pane");
+                            } else {
+                                tracing::warn!(pane_id, "PaneCreated event but no pipeline found in runtime");
+                            }
                         }
                     });
 
@@ -162,56 +182,154 @@ pub fn run() {
                         }
                     };
 
-                    // Render loop: triggered by GridUpdated events + idle timer
-                    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(4);
-
-                    let tx_event = tx.clone();
-                    event_bus_for_thread.subscribe(EventType::GridUpdated, move |_: &Event| {
-                        let _ = tx_event.try_send(());
+                    // Initialize deno_core JsRuntime with all ops extensions
+                    let mut js_runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
+                        extensions: vec![
+                            marauder_pty::ops::pty_extension(),
+                            marauder_event_bus::ops::event_bus_extension(),
+                            marauder_parser::ops::parser_extension(),
+                            marauder_grid::ops::grid_extension(),
+                            marauder_config_store::ops::config_store_extension(),
+                            marauder_runtime::ops::runtime_extension(),
+                        ],
+                        ..Default::default()
                     });
 
-                    // Idle timer for cursor blink (~30fps)
-                    let tx_timer = tx;
-                    tokio::spawn(async move {
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_millis(33)).await;
-                            if tx_timer.try_send(()).is_err() {
-                                break;
+                    // Inject shared state from the real runtime into OpState so JS ops
+                    // operate on the same subsystems as the Rust pipeline (not phantom copies).
+                    {
+                        let op_state = js_runtime.op_state();
+                        let mut state = op_state.borrow_mut();
+
+                        // Share the real event bus
+                        marauder_event_bus::ops::inject_shared_event_bus(
+                            &mut state,
+                            event_bus_for_thread.clone(),
+                        );
+
+                        // Share the real PTY manager
+                        {
+                            let rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+                            marauder_pty::ops::inject_shared_pty_manager(
+                                &mut state,
+                                rt.pty_manager().clone(),
+                            );
+
+                            // Share the real config store
+                            marauder_config_store::ops::inject_shared_config_store(
+                                &mut state,
+                                0, // handle 0 = primary config store
+                                rt.config_store().clone(),
+                            );
+
+                            // Pre-register existing pane grids and parsers
+                            for pane_id in rt.pane_ids() {
+                                if let Some(pipeline) = rt.pipeline(pane_id) {
+                                    marauder_grid::ops::inject_shared_grid(
+                                        &mut state,
+                                        pane_id as u32,
+                                        pipeline.grid.clone(),
+                                    );
+                                    marauder_parser::ops::inject_shared_parser(
+                                        &mut state,
+                                        pane_id as u32,
+                                        pipeline.parser.clone(),
+                                    );
+                                }
                             }
                         }
+
+                        // Mark the primary runtime as attached so JS knows not to create a new one
+                        marauder_runtime::ops::mark_primary_attached(&mut state);
+
+                        tracing::info!("Injected shared runtime state into JsRuntime OpState");
+                    }
+
+                    // Run bootstrap script to set up JS-side API surface
+                    js_runtime
+                        .execute_script(
+                            "[marauder:bootstrap]",
+                            deno_core::FastString::from_static(include_str!("../../src/bootstrap.js")),
+                        )
+                        .expect("Failed to execute bootstrap script");
+
+                    tracing::info!("deno_core JsRuntime initialized with all ops");
+
+                    // Render loop runs on a dedicated OS thread so vsync/present()
+                    // never blocks the tokio current_thread runtime (which drives
+                    // the JsRuntime event loop, cursor blink timer, and async ops).
+                    let active_grid_for_render = active_grid_for_thread;
+                    let renderer_for_render = Arc::clone(&renderer_for_thread);
+                    let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<()>(4);
+
+                    let render_tx_event = render_tx.clone();
+                    event_bus_for_thread.subscribe(EventType::GridUpdated, move |_: &Event| {
+                        let _ = render_tx_event.try_send(());
                     });
 
-                    let active_grid_for_render = active_grid_for_thread;
-                    loop {
-                        if rx.recv().await.is_none() {
-                            break;
-                        }
-                        // Drain queued signals (coalesce)
-                        while rx.try_recv().is_ok() {}
+                    let render_thread = std::thread::Builder::new()
+                        .name("marauder-render".into())
+                        .spawn(move || {
+                            loop {
+                                // Wait for a render signal or timeout for cursor blink (~30fps)
+                                let got_signal = render_rx
+                                    .recv_timeout(std::time::Duration::from_millis(33))
+                                    .is_ok();
 
-                        let grid = active_grid_for_render.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                        if let Some(ref grid) = grid {
-                            let mut rend = renderer_for_thread.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(ref mut renderer) = *rend {
-                                match renderer.render_frame(grid) {
-                                    Ok(()) => {}
-                                    Err(wgpu::SurfaceError::Lost) => {
-                                        tracing::debug!("Surface lost, waiting for resize");
-                                    }
-                                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                                        tracing::error!("GPU out of memory");
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "Render frame error");
+                                // Coalesce queued signals
+                                if got_signal {
+                                    while render_rx.try_recv().is_ok() {}
+                                }
+
+                                let grid = active_grid_for_render
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .clone();
+
+                                if let Some(ref grid) = grid {
+                                    let mut rend = renderer_for_render
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    if let Some(ref mut renderer) = *rend {
+                                        match renderer.render_frame(grid) {
+                                            Ok(()) => {}
+                                            Err(wgpu::SurfaceError::Lost) => {
+                                                tracing::debug!("Surface lost, waiting for resize");
+                                            }
+                                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                                tracing::error!("GPU out of memory");
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "Render frame error");
+                                            }
+                                        }
                                     }
                                 }
+                            }
+                        })
+                        .expect("Failed to spawn render thread");
+
+                    // Main async loop: drive the JsRuntime event loop
+                    loop {
+                        match js_runtime.run_event_loop(deno_core::PollEventLoopOptions::default()).await {
+                            Ok(()) => {
+                                tracing::debug!("JsRuntime event loop completed");
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "JsRuntime event loop error");
+                                break;
                             }
                         }
                     }
 
+                    // Signal render thread to stop by dropping the sender
+                    drop(render_tx);
+                    let _ = render_thread.join();
+
                     // Keep runtime alive until render loop ends
-                    runtime.shutdown().await.ok();
+                    let mut rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+                    rt.shutdown().await.ok();
                 });
             });
 

@@ -4,6 +4,7 @@ pub mod interceptor;
 pub mod ffi;
 pub mod bindgen;
 pub mod handle_registry;
+pub mod ops;
 
 pub use events::{Event, EventType, EventError};
 pub use bus::EventBus;
