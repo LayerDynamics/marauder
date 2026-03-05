@@ -17,7 +17,25 @@ import type {
 /** Client for the event bus bridge. */
 export class EventBusClient {
   private subscriberIds: Map<EventTypeValue, number[]> = new Map();
-  private channels: Channel<string>[] = [];
+  /** Map subscriber ID → Channel so channels are pruned on unsubscribe. */
+  private channelBySubscriber: Map<number, Channel<string>> = new Map();
+
+  /**
+   * Start the server-push event bridge (call once at startup).
+   * Returns a Channel that receives all non-hot-path events.
+   */
+  async startBridge(callback: (event: BusEvent) => void): Promise<void> {
+    const channel = new Channel<string>();
+    channel.onmessage = (json: string) => {
+      try {
+        const event: BusEvent = JSON.parse(json);
+        callback(event);
+      } catch (e) {
+        console.error("EventBusClient: failed to parse bridge event", e);
+      }
+    };
+    await invoke("event_bus_start_bridge", { channel });
+  }
 
   /**
    * Subscribe to event types via a Tauri Channel.
@@ -36,7 +54,6 @@ export class EventBusClient {
         console.error("EventBusClient: failed to parse event", e);
       }
     };
-    this.channels.push(channel);
 
     const ids: number[] = await invoke("event_bus_subscribe_channel", {
       event_types: eventTypes,
@@ -48,6 +65,7 @@ export class EventBusClient {
       const existing = this.subscriberIds.get(et) ?? [];
       existing.push(ids[i]);
       this.subscriberIds.set(et, existing);
+      this.channelBySubscriber.set(ids[i], channel);
     }
 
     return ids;
@@ -62,6 +80,7 @@ export class EventBusClient {
       event_type: eventType,
       subscriber_id: subscriberId,
     });
+    this.channelBySubscriber.delete(subscriberId);
     const existing = this.subscriberIds.get(eventType);
     if (existing) {
       const filtered = existing.filter((id) => id !== subscriberId);
@@ -90,7 +109,11 @@ export class EventBusClient {
       }
     }
     this.subscriberIds.clear();
-    this.channels = [];
+    this.channelBySubscriber.clear();
+  }
+
+  [Symbol.dispose](): void {
+    this.destroy().catch(() => {});
   }
 }
 
@@ -127,6 +150,10 @@ export class PtyClient {
   async list(): Promise<PtyInfo[]> {
     return invoke("pty_cmd_list", {});
   }
+
+  [Symbol.dispose](): void {
+    // No cleanup needed — PTY lifecycle managed by runtime
+  }
 }
 
 /** Client for config store commands. */
@@ -149,6 +176,10 @@ export class ConfigClient {
 
   async reload(): Promise<void> {
     await invoke("config_cmd_reload", {});
+  }
+
+  [Symbol.dispose](): void {
+    // No cleanup needed — config store is app-lifetime
   }
 }
 
@@ -201,6 +232,39 @@ export class GridClient {
   async getDimensions(paneId: number): Promise<GridDimensions> {
     return invoke("grid_cmd_get_dimensions", { pane_id: paneId });
   }
+
+  [Symbol.dispose](): void {
+    // No cleanup needed — grid lifecycle managed by runtime
+  }
+}
+
+/** Client for evaluating JS and calling ops in the embedded deno_core JsRuntime. */
+export class DenoClient {
+  /**
+   * Evaluate arbitrary JS code in the JsRuntime and return the result.
+   * Only available in debug builds — returns an error in release builds.
+   */
+  async eval(code: string): Promise<string> {
+    return invoke("deno_eval", { code });
+  }
+
+  /** Call a registered #[op2] by name with positional args. */
+  async callOp(opName: string, args: unknown[] = []): Promise<unknown> {
+    const argsJson = args.map((a) => JSON.stringify(a)).join(", ");
+    const result: string = await invoke("deno_call_op", {
+      op_name: opName,
+      args: argsJson,
+    });
+    try {
+      return JSON.parse(result);
+    } catch {
+      return result;
+    }
+  }
+
+  [Symbol.dispose](): void {
+    // No cleanup needed — Deno runtime is app-lifetime
+  }
 }
 
 /** Client for renderer commands. */
@@ -211,6 +275,10 @@ export class RendererClient {
 
   async resize(width: number, height: number, scaleFactor: number): Promise<void> {
     await invoke("renderer_resize", { width, height, scale_factor: scaleFactor });
+  }
+
+  [Symbol.dispose](): void {
+    // No cleanup needed — renderer is app-lifetime
   }
 }
 
@@ -230,5 +298,9 @@ export class RuntimeClient {
 
   async closePane(paneId: number): Promise<void> {
     await invoke("runtime_cmd_close_pane", { pane_id: paneId });
+  }
+
+  [Symbol.dispose](): void {
+    // No cleanup needed — runtime is app-lifetime
   }
 }

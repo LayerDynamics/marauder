@@ -1,9 +1,10 @@
 mod event_bridge;
+mod ipc_bridge;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use marauder_event_bus::bus;
 use marauder_event_bus::events::{Event, EventType};
 use marauder_grid::Grid;
@@ -95,6 +96,8 @@ pub fn run() {
         Arc::new(OnceLock::new());
     let runtime_for_setup = shared_runtime.clone();
 
+    let (deno_tx, deno_rx) = tokio::sync::mpsc::channel::<ipc_bridge::DenoRequest>(64);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(event_bus.clone())
@@ -104,6 +107,8 @@ pub fn run() {
         .manage(pane_grids.clone())
         .manage(tauri_config_store)
         .manage(TauriRuntimeHandle::new(shared_runtime))
+        .manage(ipc_bridge::DenoBridge { tx: deno_tx })
+        .manage(Mutex::new(Option::<event_bridge::TauriBridge>::None))
         .setup(move |app| {
             let window = app.get_webview_window("main")
                 .expect("main window not found");
@@ -119,7 +124,11 @@ pub fn run() {
             let config_store_for_thread = config_store_for_setup.clone();
             let runtime_handle_for_thread = runtime_for_setup.clone();
 
+            // Clone window for error reporting from the background thread
+            let window_for_error = window.clone();
+
             // Spawn everything on a dedicated thread with its own tokio runtime
+            let mut deno_rx = deno_rx;
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -133,6 +142,9 @@ pub fn run() {
 
                     if let Err(e) = runtime.boot().await {
                         tracing::error!(error = %e, "Failed to boot Marauder runtime");
+                        let msg = format!("Runtime boot failed: {}", e);
+                        let _ = window_for_error.set_title(&format!("Marauder — {}", msg));
+                        let _ = window_for_error.emit("marauder://runtime-error", msg);
                         return;
                     }
 
@@ -244,15 +256,22 @@ pub fn run() {
 
                             // Pre-register existing pane grids and parsers
                             for pane_id in rt.pane_ids() {
+                                let handle: u32 = match pane_id.try_into() {
+                                    Ok(h) => h,
+                                    Err(_) => {
+                                        tracing::error!(pane_id, "PaneId exceeds u32 range, skipping op registration");
+                                        continue;
+                                    }
+                                };
                                 if let Some(pipeline) = rt.pipeline(pane_id) {
                                     marauder_grid::ops::inject_shared_grid(
                                         &mut state,
-                                        pane_id as u32,
+                                        handle,
                                         pipeline.grid.clone(),
                                     );
                                     marauder_parser::ops::inject_shared_parser(
                                         &mut state,
-                                        pane_id as u32,
+                                        handle,
                                         pipeline.parser.clone(),
                                     );
                                 }
@@ -292,13 +311,18 @@ pub fn run() {
                         .spawn(move || {
                             loop {
                                 // Wait for a render signal or timeout for cursor blink (~30fps)
-                                let got_signal = render_rx
-                                    .recv_timeout(std::time::Duration::from_millis(33))
-                                    .is_ok();
-
-                                // Coalesce queued signals
-                                if got_signal {
-                                    while render_rx.try_recv().is_ok() {}
+                                match render_rx.recv_timeout(std::time::Duration::from_millis(33)) {
+                                    Ok(()) => {
+                                        // Coalesce queued signals
+                                        while render_rx.try_recv().is_ok() {}
+                                    }
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                        // Normal timeout — render for cursor blink
+                                    }
+                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                        tracing::info!("Render channel disconnected, exiting render loop");
+                                        break;
+                                    }
                                 }
 
                                 let grid = active_grid_for_render
@@ -330,15 +354,65 @@ pub fn run() {
                         })
                         .expect("Failed to spawn render thread");
 
-                    // Main async loop: drive the JsRuntime event loop
+                    // Main async loop: drive the JsRuntime event loop + IPC bridge
                     loop {
-                        match js_runtime.run_event_loop(deno_core::PollEventLoopOptions::default()).await {
-                            Ok(()) => {
-                                tracing::debug!("JsRuntime event loop completed");
+                        tokio::select! {
+                            result = js_runtime.run_event_loop(deno_core::PollEventLoopOptions::default()) => {
+                                match result {
+                                    Ok(()) => {
+                                        tracing::debug!("JsRuntime event loop completed");
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(error = %e, "JsRuntime event loop error");
+                                        break;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                tracing::error!(error = %e, "JsRuntime event loop error");
-                                break;
+                            Some(request) = deno_rx.recv() => {
+                                match request {
+                                    ipc_bridge::DenoRequest::Eval { code, reply } => {
+                                        #[cfg(debug_assertions)]
+                                        {
+                                            let wrapped = format!(
+                                                "((r) => typeof r === 'undefined' ? 'undefined' : JSON.stringify(r))({})",
+                                                code
+                                            );
+                                            let result = js_runtime
+                                                .execute_script("<eval>", deno_core::FastString::from(wrapped));
+                                            let reply_result = match result {
+                                                Ok(global) => {
+                                                    deno_core::scope!(scope, js_runtime);
+                                                    let local = deno_core::v8::Local::new(scope, global);
+                                                    Ok(local.to_rust_string_lossy(scope))
+                                                }
+                                                Err(e) => Err(e.to_string()),
+                                            };
+                                            let _ = reply.send(reply_result);
+                                        }
+                                        #[cfg(not(debug_assertions))]
+                                        {
+                                            let _ = reply.send(Err("deno_eval is disabled in release builds".to_string()));
+                                        }
+                                    }
+                                    ipc_bridge::DenoRequest::CallOp { op_name, args, reply } => {
+                                        let js = format!(
+                                            "JSON.stringify(Deno.core.ops.{}({}))",
+                                            op_name,
+                                            args
+                                        );
+                                        let result = js_runtime
+                                            .execute_script("<call_op>", deno_core::FastString::from(js));
+                                        let reply_result = match result {
+                                            Ok(global) => {
+                                                deno_core::scope!(scope, js_runtime);
+                                                let local = deno_core::v8::Local::new(scope, global);
+                                                Ok(local.to_rust_string_lossy(scope))
+                                            }
+                                            Err(e) => Err(e.to_string()),
+                                        };
+                                        let _ = reply.send(reply_result);
+                                    }
+                                }
                             }
                         }
                     }
@@ -357,6 +431,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             event_bridge::event_bus_emit,
+            event_bridge::event_bus_start_bridge,
             event_bridge::event_bus_subscribe_channel,
             event_bridge::event_bus_unsubscribe_channel,
             renderer_get_cell_size,
@@ -387,6 +462,8 @@ pub fn run() {
             marauder_runtime::commands::runtime_cmd_pane_ids,
             marauder_runtime::commands::runtime_cmd_create_pane,
             marauder_runtime::commands::runtime_cmd_close_pane,
+            ipc_bridge::deno_eval,
+            ipc_bridge::deno_call_op,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
