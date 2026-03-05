@@ -2,6 +2,7 @@
  * Marauder frontend bootstrap — wires tab bar, status bar, and IPC.
  */
 
+import { invoke } from "@tauri-apps/api/core";
 import { EventBusClient, PtyClient } from "./ipc";
 import { TabBar } from "./components/tab-bar";
 import { StatusBar } from "./components/status-bar";
@@ -23,6 +24,10 @@ let statusBar: StatusBar;
 let activePaneId: number | null = null;
 let tabCounter = 0;
 
+/** Cached cell size from the renderer. Updated on init and font changes. */
+let cellWidth = 0;
+let cellHeight = 0;
+
 /** Decode a BusEvent payload (byte array) to a parsed object. */
 function decodePayload<T>(event: BusEvent): T | null {
   try {
@@ -31,6 +36,29 @@ function decodePayload<T>(event: BusEvent): T | null {
     return JSON.parse(text) as T;
   } catch {
     return null;
+  }
+}
+
+/** Fetch cell size from the renderer via Tauri command. */
+async function fetchCellSize(): Promise<void> {
+  try {
+    const size: [number, number] = await invoke("renderer_get_cell_size");
+    cellWidth = size[0];
+    cellHeight = size[1];
+
+    // Update data attributes on grid element for external consumers
+    const grid = document.getElementById("terminal-grid");
+    if (grid) {
+      grid.setAttribute("data-cell-width", cellWidth.toString());
+      grid.setAttribute("data-cell-height", cellHeight.toString());
+    }
+  } catch {
+    // Renderer may not be ready yet — use config-derived defaults
+    // These match RendererConfig::default() font_size=14, line_height=1.2
+    if (cellWidth === 0) {
+      cellWidth = 8.4;  // 14 * 0.6
+      cellHeight = 16.8; // 14 * 1.2
+    }
   }
 }
 
@@ -106,18 +134,37 @@ function handleEvent(event: BusEvent): void {
   }
 }
 
-/** Forward keyboard input to the active PTY. */
+/** Forward keyboard input to the active PTY, including Ctrl sequences. */
 function handleKeyInput(e: KeyboardEvent): void {
   if (activePaneId === null) return;
 
-  // Skip modifier-only keys and browser shortcuts
+  // Skip modifier-only key presses
   if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") return;
-  if (e.metaKey || e.ctrlKey) return; // Let system shortcuts through
 
-  e.preventDefault();
+  // Let Meta (Cmd on macOS) shortcuts pass through to the system
+  if (e.metaKey) return;
 
   let data: string;
-  if (e.key.length === 1) {
+
+  if (e.ctrlKey && e.key.length === 1) {
+    // Map Ctrl+letter to control characters (Ctrl+A=0x01, Ctrl+C=0x03, etc.)
+    const code = e.key.toLowerCase().charCodeAt(0);
+    if (code >= 0x61 && code <= 0x7a) {
+      // a-z → 0x01-0x1a
+      data = String.fromCharCode(code - 0x60);
+    } else if (e.key === "[") {
+      data = "\x1b"; // Ctrl+[ = Escape
+    } else if (e.key === "\\") {
+      data = "\x1c"; // Ctrl+\ = SIGQUIT
+    } else if (e.key === "]") {
+      data = "\x1d"; // Ctrl+]
+    } else {
+      return;
+    }
+  } else if (e.ctrlKey) {
+    // Ctrl+non-letter (arrows, etc.) — let browser handle or ignore
+    return;
+  } else if (e.key.length === 1) {
     data = e.key;
   } else {
     // Map special keys to ANSI sequences
@@ -139,22 +186,23 @@ function handleKeyInput(e: KeyboardEvent): void {
     }
   }
 
+  e.preventDefault();
+
   const bytes = Array.from(new TextEncoder().encode(data));
-  ptyClient.write(activePaneId, bytes).catch((e) => {
-    console.error("Failed to write to PTY:", e);
+  ptyClient.write(activePaneId, bytes).catch((err) => {
+    console.error("Failed to write to PTY:", err);
   });
 }
 
-/** Handle window resize — resize the active PTY. */
+/** Handle window resize — resize the active PTY using renderer cell metrics. */
 function handleResize(): void {
   if (activePaneId === null) return;
 
   const grid = document.getElementById("terminal-grid");
   if (!grid) return;
 
-  // Estimate cell size (monospace ~8px wide, ~16px tall at default)
-  const cellWidth = 8;
-  const cellHeight = 16;
+  if (cellWidth <= 0 || cellHeight <= 0) return;
+
   const cols = Math.floor(grid.clientWidth / cellWidth);
   const rows = Math.floor(grid.clientHeight / cellHeight);
 
@@ -163,7 +211,23 @@ function handleResize(): void {
       console.error("Failed to resize PTY:", e);
     });
     statusBar.setDimensions(rows, cols);
+
+    // Notify renderer of new surface size
+    invoke("renderer_resize", {
+      width: Math.round(grid.clientWidth * window.devicePixelRatio),
+      height: Math.round(grid.clientHeight * window.devicePixelRatio),
+      scaleFactor: window.devicePixelRatio,
+    }).catch(() => {
+      // Renderer may not be initialized yet
+    });
   }
+}
+
+/** Clean up subscriptions and listeners on window unload. */
+function teardown(): void {
+  document.removeEventListener("keydown", handleKeyInput);
+  window.removeEventListener("resize", handleResize);
+  eventBus.destroy().catch(() => {});
 }
 
 /** Bootstrap the application. */
@@ -198,11 +262,20 @@ window.addEventListener("DOMContentLoaded", async () => {
     handleEvent
   );
 
+  // Fetch cell size from renderer (retry briefly if renderer isn't ready)
+  await fetchCellSize();
+  if (cellWidth === 0) {
+    setTimeout(fetchCellSize, 500);
+  }
+
   // Wire keyboard input
   document.addEventListener("keydown", handleKeyInput);
 
   // Wire window resize
   window.addEventListener("resize", handleResize);
+
+  // Clean up on unload
+  window.addEventListener("beforeunload", teardown);
 
   // Create initial tab
   await createTab();
