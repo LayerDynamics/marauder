@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use marauder_event_bus::lock_or_log;
 use marauder_grid::Grid;
 use tracing;
 
@@ -179,7 +180,7 @@ impl Renderer {
     pub fn render_frame(&mut self, grid: &Arc<Mutex<Grid>>) -> Result<(), wgpu::SurfaceError> {
         // Lock grid, build instance data, release lock before GPU work
         let (bg_instances, text_instances, cursor_row, cursor_col) = {
-            let mut grid = grid.lock().unwrap_or_else(|e| e.into_inner());
+            let mut grid = lock_or_log(&grid, "renderer::render_frame");
             let result = self.build_instances(&grid);
             grid.clear_dirty();
             result

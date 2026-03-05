@@ -3,6 +3,8 @@ use std::ffi::{c_char, CStr};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use marauder_event_bus::lock_or_log;
+
 use crate::manager::{PtyConfig, PtyManager};
 use crate::pty;
 
@@ -88,7 +90,7 @@ pub unsafe extern "C" fn pty_create(
         cols,
     };
 
-    let mut mgr = handle.manager.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&handle.manager, "pty::ffi_create");
     match mgr.create(config) {
         Ok(id) => id,
         Err(e) => {
@@ -120,7 +122,7 @@ pub unsafe extern "C" fn pty_read(
     let handle = unsafe { &*handle };
     let slice = unsafe { std::slice::from_raw_parts_mut(buf, buf_len) };
 
-    let mut mgr = handle.manager.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&handle.manager, "pty::ffi_read");
     match mgr.read(pane_id, slice) {
         Ok(n) => n as i64,
         Err(e) => {
@@ -148,7 +150,7 @@ pub unsafe extern "C" fn pty_write(
     let handle = unsafe { &*handle };
     let slice = unsafe { std::slice::from_raw_parts(data, data_len) };
 
-    let mut mgr = handle.manager.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&handle.manager, "pty::ffi_write");
     match mgr.write(pane_id, slice) {
         Ok(n) => n as i64,
         Err(e) => {
@@ -174,7 +176,7 @@ pub unsafe extern "C" fn pty_resize(
     }
     let handle = unsafe { &*handle };
 
-    let mut mgr = handle.manager.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&handle.manager, "pty::ffi_resize");
     match mgr.resize(pane_id, rows, cols) {
         Ok(()) => 1,
         Err(e) => {
@@ -198,7 +200,7 @@ pub unsafe extern "C" fn pty_close(
     }
     let handle = unsafe { &*handle };
 
-    let mut mgr = handle.manager.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&handle.manager, "pty::ffi_close");
     match mgr.close(pane_id) {
         Ok(()) => 1,
         Err(e) => {
@@ -222,7 +224,7 @@ pub unsafe extern "C" fn pty_get_pid(
     }
     let handle = unsafe { &*handle };
 
-    let mgr = handle.manager.lock().unwrap_or_else(|e| e.into_inner());
+    let mgr = lock_or_log(&handle.manager, "pty::ffi_get_pid");
     match mgr.get_pid(pane_id) {
         Ok(Some(pid)) => pid,
         _ => 0,
@@ -243,7 +245,7 @@ pub unsafe extern "C" fn pty_wait(
     }
     let handle = unsafe { &*handle };
 
-    let mut mgr = handle.manager.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&handle.manager, "pty::ffi_wait");
     match mgr.try_wait(pane_id) {
         Ok(Some(_)) => 1,
         Ok(None) => 0,
@@ -261,7 +263,7 @@ pub unsafe extern "C" fn pty_count(handle: *mut PtyManagerHandle) -> u64 {
         return 0;
     }
     let handle = unsafe { &*handle };
-    let mgr = handle.manager.lock().unwrap_or_else(|e| e.into_inner());
+    let mgr = lock_or_log(&handle.manager, "pty::ffi_count");
     mgr.count() as u64
 }
 

@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 
+use marauder_event_bus::lock_or_log;
+
 use crate::engine::ComputeEngine;
 use crate::types::*;
 use marauder_grid::ffi::GridHandle;
@@ -82,7 +84,7 @@ pub unsafe extern "C" fn compute_upload_cells(
         }
     };
 
-    let mut engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
+    let mut engine = lock_or_log(&handle.engine, "compute::ffi");
     engine.upload_cells_raw(&cells, rows, cols);
     1
 }
@@ -104,7 +106,7 @@ pub unsafe extern "C" fn compute_upload_from_grid(
     let handle = unsafe { &*handle };
     let grid_handle = unsafe { &*grid_handle };
 
-    let mut engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
+    let mut engine = lock_or_log(&handle.engine, "compute::ffi");
     grid_handle.with_grid(|grid| engine.upload_cells(grid));
     1
 }
@@ -133,7 +135,7 @@ pub unsafe extern "C" fn compute_search(
         Err(_) => return INTERNAL_ERROR,
     };
 
-    let engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = lock_or_log(&handle.engine, "compute::ffi");
     let results = match engine.search(pattern) {
         Ok(r) => r,
         Err(e) => {
@@ -162,7 +164,7 @@ pub unsafe extern "C" fn compute_detect_urls(
         return INTERNAL_ERROR;
     }
     let handle = unsafe { &*handle };
-    let engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = lock_or_log(&handle.engine, "compute::ffi");
     let results = match engine.detect_urls(row_start, row_end) {
         Ok(r) => r,
         Err(e) => {
@@ -188,7 +190,7 @@ pub unsafe extern "C" fn compute_highlight_cells(
         return INTERNAL_ERROR;
     }
     let handle = unsafe { &*handle };
-    let engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = lock_or_log(&handle.engine, "compute::ffi");
     let results = match engine.highlight_cells() {
         Ok(r) => r,
         Err(e) => {
@@ -218,7 +220,7 @@ pub unsafe extern "C" fn compute_extract_selection(
         return INTERNAL_ERROR;
     }
     let handle = unsafe { &*handle };
-    let engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = lock_or_log(&handle.engine, "compute::ffi");
     let text = match engine.extract_selection(start_row, start_col, end_row, end_col) {
         Ok(t) => t,
         Err(e) => {

@@ -24,6 +24,11 @@ anyhow = { workspace = true }
 deno_bindgen = { workspace = true }
 deno_core = { workspace = true }
 deno_error = { workspace = true }
+tauri = { workspace = true, optional = true }
+
+[features]
+default = []
+tauri-commands = ["dep:tauri"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use crate::sync_util::lock_or_log;
+
 /// A thread-safe registry mapping `u32` handle IDs to values of type `T`.
 ///
 /// IDs start at 1 and increment monotonically. On overflow, `allocate()`
@@ -34,13 +36,13 @@ impl<T> HandleRegistry<T> {
 
     /// Allocate a new ID and insert the value. Returns the ID, or `0` on overflow.
     pub fn allocate(&self, value: T) -> u32 {
-        let mut id = self.id_counter().lock().unwrap_or_else(|e| e.into_inner());
+        let mut id = lock_or_log(self.id_counter(), "HandleRegistry::allocate/next_id");
         let val = *id;
         match val.checked_add(1) {
             Some(next) => {
                 *id = next;
                 drop(id); // release ID lock before acquiring map lock
-                self.map().lock().unwrap_or_else(|e| e.into_inner()).insert(val, value);
+                lock_or_log(self.map(), "HandleRegistry::allocate/map").insert(val, value);
                 val
             }
             None => {
@@ -52,7 +54,7 @@ impl<T> HandleRegistry<T> {
 
     /// Get a clone of the value for a handle ID.
     pub fn get<R>(&self, id: u32, f: impl FnOnce(&T) -> R) -> Option<R> {
-        let map = self.map().lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock_or_log(self.map(), "HandleRegistry::get/map");
         map.get(&id).map(f)
     }
 
@@ -66,6 +68,6 @@ impl<T> HandleRegistry<T> {
 
     /// Remove a handle.
     pub fn remove(&self, id: u32) -> Option<T> {
-        self.map().lock().unwrap_or_else(|e| e.into_inner()).remove(&id)
+        lock_or_log(self.map(), "HandleRegistry::remove/map").remove(&id)
     }
 }

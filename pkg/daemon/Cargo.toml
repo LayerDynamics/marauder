@@ -8,6 +8,7 @@ name = "marauder_daemon"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+marauder-event-bus = { path = "../event-bus" }
 marauder-ipc = { path = "../ipc" }
 serde = { workspace = true }
 serde_json = { workspace = true }

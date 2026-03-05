@@ -201,10 +201,18 @@ impl Grid {
         Some(text.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n"))
     }
 
-    /// Scroll the viewport into scrollback history.
+    /// Set viewport to an absolute scrollback offset (0 = bottom).
     pub fn scroll_viewport(&mut self, offset: usize) {
         let max = self.active_screen().scrollback_len();
         self.viewport_offset = offset.min(max);
+    }
+
+    /// Scroll the viewport by a signed delta (positive = up into scrollback,
+    /// negative = down toward the bottom). Clamps to valid range.
+    pub fn scroll_viewport_by(&mut self, delta: i64) {
+        let max = self.active_screen().scrollback_len() as i64;
+        let new_offset = (self.viewport_offset as i64 + delta).clamp(0, max);
+        self.viewport_offset = new_offset as usize;
     }
 
     /// Apply a parsed terminal action to the grid.

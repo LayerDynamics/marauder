@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use marauder_event_bus::lock_or_log;
 use marauder_ipc::message::{IpcMessage, IpcRequest};
 use marauder_ipc::server::{IpcServer, RequestHandler};
 use tokio::sync::broadcast;
@@ -155,7 +156,7 @@ impl MarauderDaemon {
             server.shutdown().await;
         }
         // Clean up sessions
-        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = lock_or_log(&self.sessions, "daemon::shutdown");
         sessions.clear();
         tracing::info!("Marauder daemon shut down");
     }
@@ -190,7 +191,7 @@ impl MarauderDaemon {
                 let rows = rows.unwrap_or(24);
                 let cols = cols.unwrap_or(80);
 
-                let mut locked = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let mut locked = lock_or_log(sessions, "daemon::create_session");
 
                 // Enforce session count limit
                 if locked.len() >= max_sessions {
@@ -211,13 +212,13 @@ impl MarauderDaemon {
             }
 
             IpcRequest::ListSessions => {
-                let sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let sessions = lock_or_log(sessions, "daemon::list_sessions");
                 let infos: Vec<_> = sessions.values().map(|s| s.info()).collect();
                 IpcMessage::ok(0, Some(serde_json::to_value(infos).unwrap()))
             }
 
             IpcRequest::AttachSession { session_id } => {
-                let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let mut sessions = lock_or_log(sessions, "daemon::attach_session");
                 match sessions.get_mut(&session_id) {
                     Some(session) => {
                         session.attach();
@@ -228,7 +229,7 @@ impl MarauderDaemon {
             }
 
             IpcRequest::DetachSession { session_id } => {
-                let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let mut sessions = lock_or_log(sessions, "daemon::detach_session");
                 match sessions.get_mut(&session_id) {
                     Some(session) => {
                         session.detach();
@@ -239,7 +240,7 @@ impl MarauderDaemon {
             }
 
             IpcRequest::KillSession { session_id } => {
-                let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let mut sessions = lock_or_log(sessions, "daemon::kill_session");
                 match sessions.remove(&session_id) {
                     Some(_) => {
                         tracing::info!(session_id, "Session killed");
@@ -250,7 +251,7 @@ impl MarauderDaemon {
             }
 
             IpcRequest::Resize { session_id, rows, cols } => {
-                let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let mut sessions = lock_or_log(sessions, "daemon::resize");
                 match sessions.get_mut(&session_id) {
                     Some(session) => {
                         session.rows = rows;
@@ -263,7 +264,7 @@ impl MarauderDaemon {
 
             IpcRequest::Write { session_id, data: _ } => {
                 // Phase 1 skeleton: acknowledge but don't actually write to PTY yet
-                let sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let sessions = lock_or_log(sessions, "daemon::write");
                 if sessions.contains_key(&session_id) {
                     IpcMessage::ok(0, None)
                 } else {

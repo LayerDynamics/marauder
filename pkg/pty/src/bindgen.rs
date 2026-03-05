@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use marauder_event_bus::lock_or_log;
 use marauder_event_bus::HandleRegistry;
 
 use crate::manager::{PtyConfig, PtyManager};
@@ -37,7 +38,7 @@ fn pty_bindgen_open(handle_id: u32, shell: &str, cwd: &str, rows: u16, cols: u16
         PathBuf::from(cwd)
     };
     let config = PtyConfig { shell, env: HashMap::new(), cwd, rows, cols };
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::bindgen_open");
     mgr.create(config).unwrap_or(0)
 }
 
@@ -48,7 +49,7 @@ fn pty_bindgen_write(handle_id: u32, pane_id: u64, data: &str) -> i32 {
         Some(m) => m,
         None => return -1,
     };
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::bindgen_write");
     match mgr.write(pane_id, data.as_bytes()) {
         Ok(n) => n as i32,
         Err(_) => -1,
@@ -62,7 +63,7 @@ fn pty_bindgen_resize(handle_id: u32, pane_id: u64, rows: u16, cols: u16) -> u8 
         Some(m) => m,
         None => return 0,
     };
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::bindgen_resize");
     if mgr.resize(pane_id, rows, cols).is_ok() { 1 } else { 0 }
 }
 
@@ -73,7 +74,7 @@ fn pty_bindgen_close(handle_id: u32, pane_id: u64) -> u8 {
         Some(m) => m,
         None => return 0,
     };
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::bindgen_close");
     if mgr.close(pane_id).is_ok() { 1 } else { 0 }
 }
 
@@ -84,7 +85,7 @@ fn pty_bindgen_get_pid(handle_id: u32, pane_id: u64) -> u32 {
         Some(m) => m,
         None => return 0,
     };
-    let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mgr = lock_or_log(&mgr, "pty::bindgen_get_pid");
     match mgr.get_pid(pane_id) {
         Ok(Some(pid)) => pid,
         _ => 0,

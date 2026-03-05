@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use deno_core::op2;
 use deno_core::OpState;
+use marauder_event_bus::lock_or_log;
 
 use crate::config::RuntimeConfig;
 use crate::lifecycle::{MarauderRuntime, RuntimeState};
@@ -39,7 +40,7 @@ fn init_runtime_state(state: &mut OpState) {
 /// (pty, grid, parser, event-bus, config) rather than creating a new runtime.
 pub fn mark_primary_attached(state: &mut OpState) {
     let attached = state.borrow::<PrimaryAttached>().clone();
-    *attached.lock().unwrap_or_else(|e| e.into_inner()) = true;
+    *lock_or_log(&attached, "runtime::mark_primary_attached") = true;
 }
 
 fn with_runtime<R>(
@@ -48,13 +49,13 @@ fn with_runtime<R>(
     f: impl FnOnce(&mut MarauderRuntime) -> R,
 ) -> Result<R, RuntimeOpError> {
     let map = state.borrow::<RuntimeMap>().clone();
-    let map = map.lock().unwrap_or_else(|e| e.into_inner());
+    let map = lock_or_log(&map, "runtime::with_runtime map");
     let rt_arc = map
         .get(&handle)
         .cloned()
         .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?;
     drop(map);
-    let mut rt = rt_arc.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rt = lock_or_log(&rt_arc, "runtime::with_runtime instance");
     Ok(f(&mut rt))
 }
 
@@ -62,20 +63,20 @@ fn with_runtime<R>(
 
 fn runtime_create_impl(state: &mut OpState) -> Result<u32, RuntimeOpError> {
     let id_rc = state.borrow::<NextRuntimeId>().clone();
-    let mut id = id_rc.lock().unwrap_or_else(|e| e.into_inner());
+    let mut id = lock_or_log(&id_rc, "runtime::create next_id");
     let handle = *id;
     *id = id.checked_add(1).ok_or_else(|| RuntimeOpError("runtime handle ID overflow".to_string()))?;
     drop(id);
 
     let map = state.borrow::<RuntimeMap>().clone();
-    map.lock().unwrap_or_else(|e| e.into_inner())
+    lock_or_log(&map, "runtime::create insert")
         .insert(handle, Arc::new(Mutex::new(MarauderRuntime::new(RuntimeConfig::default()))));
     Ok(handle)
 }
 
 fn runtime_is_primary_attached_impl(state: &mut OpState) -> u32 {
     let attached = state.borrow::<PrimaryAttached>().clone();
-    if *attached.lock().unwrap_or_else(|e| e.into_inner()) { 1 } else { 0 }
+    if *lock_or_log(&attached, "runtime::is_primary_attached") { 1 } else { 0 }
 }
 
 fn runtime_create_pane_impl(state: &mut OpState, handle: u32) -> Result<u32, RuntimeOpError> {
@@ -124,7 +125,7 @@ fn runtime_state_impl(state: &mut OpState, handle: u32) -> Result<String, Runtim
 
 fn runtime_destroy_impl(state: &mut OpState, handle: u32) -> Result<(), RuntimeOpError> {
     let map = state.borrow::<RuntimeMap>().clone();
-    map.lock().unwrap_or_else(|e| e.into_inner())
+    lock_or_log(&map, "runtime::destroy")
         .remove(&handle)
         .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?;
     // The Arc<Mutex<MarauderRuntime>> is dropped here, releasing the runtime
@@ -158,12 +159,12 @@ pub async fn op_runtime_boot(
     let rt_arc = {
         let state = state.borrow();
         let map = state.borrow::<RuntimeMap>().clone();
-        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock_or_log(&map, "runtime::boot map");
         map.get(&handle)
             .cloned()
             .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?
     };
-    let mut rt = rt_arc.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rt = lock_or_log(&rt_arc, "runtime::boot instance");
     rt.boot().await.map_err(RuntimeOpError::from)
 }
 
@@ -176,12 +177,12 @@ pub async fn op_runtime_shutdown(
     let rt_arc = {
         let state = state.borrow();
         let map = state.borrow::<RuntimeMap>().clone();
-        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock_or_log(&map, "runtime::shutdown map");
         map.get(&handle)
             .cloned()
             .ok_or_else(|| RuntimeOpError(format!("invalid runtime handle: {handle}")))?
     };
-    let mut rt = rt_arc.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rt = lock_or_log(&rt_arc, "runtime::shutdown instance");
     rt.shutdown().await.map_err(RuntimeOpError::from)
 }
 
@@ -365,7 +366,7 @@ mod tests {
         // Set NextRuntimeId to u32::MAX so the next checked_add overflows.
         {
             let id_rc = state.borrow::<NextRuntimeId>().clone();
-            let mut id = id_rc.lock().unwrap_or_else(|e| e.into_inner());
+            let mut id = lock_or_log(&id_rc, "runtime::test overflow");
             *id = u32::MAX;
         }
         let result = runtime_create_impl(&mut state);

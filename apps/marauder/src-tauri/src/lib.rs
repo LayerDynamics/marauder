@@ -1,24 +1,21 @@
 mod event_bridge;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tauri::Manager;
 use marauder_event_bus::bus;
 use marauder_event_bus::events::{Event, EventType};
 use marauder_grid::Grid;
+use marauder_grid::{SharedGrid, PaneGridMap};
 use marauder_pty::{PaneId, TauriPtyManager};
 use marauder_renderer::{Renderer, RendererConfig};
+use marauder_config_store::commands::TauriConfigStore;
 use marauder_runtime::{MarauderRuntime, RuntimeConfig};
-
-/// Active grid for the focused pane, shared between pipeline and renderer.
-type SharedGrid = Arc<Mutex<Grid>>;
+use marauder_runtime::commands::TauriRuntimeHandle;
 
 /// Shared renderer handle, accessible from Tauri commands.
 type SharedRenderer = Arc<Mutex<Option<Renderer>>>;
-
-/// Map of pane_id → grid, shared so focus changes can swap the active grid.
-type PaneGridMap = Arc<Mutex<HashMap<PaneId, SharedGrid>>>;
 
 /// Currently focused pane's grid, swapped on PaneFocused events.
 type ActiveGrid = Arc<Mutex<Option<SharedGrid>>>;
@@ -90,12 +87,23 @@ pub fn run() {
         }
     });
 
+    // Pre-create Tauri managed state wrappers — populated inside setup thread after boot.
+    let tauri_config_store = TauriConfigStore::new();
+    let config_store_for_setup = tauri_config_store.clone();
+
+    let shared_runtime: Arc<OnceLock<Arc<Mutex<MarauderRuntime>>>> =
+        Arc::new(OnceLock::new());
+    let runtime_for_setup = shared_runtime.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(event_bus.clone())
         .manage(webview_subs)
         .manage(TauriPtyManager::new())
         .manage(shared_renderer)
+        .manage(pane_grids.clone())
+        .manage(tauri_config_store)
+        .manage(TauriRuntimeHandle::new(shared_runtime))
         .setup(move |app| {
             let window = app.get_webview_window("main")
                 .expect("main window not found");
@@ -107,6 +115,9 @@ pub fn run() {
             let window_arc = Arc::new(window.clone());
             let size = window.inner_size().unwrap_or(tauri::PhysicalSize::new(800, 600));
             let scale = window.scale_factor().unwrap_or(1.0) as f32;
+
+            let config_store_for_thread = config_store_for_setup.clone();
+            let runtime_handle_for_thread = runtime_for_setup.clone();
 
             // Spawn everything on a dedicated thread with its own tokio runtime
             std::thread::spawn(move || {
@@ -145,6 +156,15 @@ pub fn run() {
                     // Wrap runtime in Arc<Mutex<>> so the PaneCreated handler can
                     // access pipeline grids (the real ones connected to PTY data).
                     let runtime = Arc::new(Mutex::new(runtime));
+
+                    // Inject runtime into Tauri managed state so commands can access it.
+                    let _ = runtime_handle_for_thread.set(Arc::clone(&runtime));
+
+                    // Inject the real config store into the Tauri managed state.
+                    {
+                        let rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+                        config_store_for_thread.inject(rt.config_store().clone());
+                    }
 
                     // Listen for new panes to register their grids from the runtime pipeline
                     let pane_grids_for_new = pane_grids_for_thread.clone();
@@ -349,6 +369,24 @@ pub fn run() {
             marauder_pty::commands::pty_cmd_get_pid,
             marauder_pty::commands::pty_cmd_wait,
             marauder_pty::commands::pty_cmd_list,
+            marauder_config_store::commands::config_cmd_get,
+            marauder_config_store::commands::config_cmd_set,
+            marauder_config_store::commands::config_cmd_keys,
+            marauder_config_store::commands::config_cmd_save,
+            marauder_config_store::commands::config_cmd_reload,
+            marauder_grid::commands::grid_cmd_get_cursor,
+            marauder_grid::commands::grid_cmd_get_cell,
+            marauder_grid::commands::grid_cmd_get_selection_text,
+            marauder_grid::commands::grid_cmd_set_selection,
+            marauder_grid::commands::grid_cmd_clear_selection,
+            marauder_grid::commands::grid_cmd_scroll_viewport,
+            marauder_grid::commands::grid_cmd_scroll_viewport_by,
+            marauder_grid::commands::grid_cmd_get_dimensions,
+            marauder_grid::commands::grid_cmd_get_screen_snapshot,
+            marauder_runtime::commands::runtime_cmd_state,
+            marauder_runtime::commands::runtime_cmd_pane_ids,
+            marauder_runtime::commands::runtime_cmd_create_pane,
+            marauder_runtime::commands::runtime_cmd_close_pane,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

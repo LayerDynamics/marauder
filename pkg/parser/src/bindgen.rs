@@ -3,7 +3,7 @@
 use deno_bindgen::deno_bindgen;
 use std::sync::{Arc, Mutex};
 
-use marauder_event_bus::HandleRegistry;
+use marauder_event_bus::{lock_or_log, HandleRegistry};
 
 use crate::performer::MarauderParser;
 
@@ -26,7 +26,7 @@ fn parser_bindgen_feed(handle_id: u32, input: &str) -> String {
         Some(p) => p,
         None => return "[]".to_string(),
     };
-    let mut parser = parser.lock().unwrap_or_else(|e| e.into_inner());
+    let mut parser = lock_or_log(&parser, "parser::bindgen_feed");
     let mut actions = Vec::new();
     parser.feed(input.as_bytes(), |action| {
         actions.push(action);
@@ -41,7 +41,7 @@ fn parser_bindgen_reset(handle_id: u32) {
         Some(p) => p,
         None => return,
     };
-    let mut parser = parser.lock().unwrap_or_else(|e| e.into_inner());
+    let mut parser = lock_or_log(&parser, "parser::bindgen_reset");
     *parser = MarauderParser::new();
 }
 

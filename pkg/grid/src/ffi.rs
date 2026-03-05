@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 
+use marauder_event_bus::lock_or_log;
+
 use crate::grid::Grid;
 use marauder_parser::TerminalAction;
 
@@ -14,7 +16,7 @@ impl GridHandle {
     where
         F: FnOnce(&Grid) -> R,
     {
-        let grid = self.grid.lock().unwrap_or_else(|e| e.into_inner());
+        let grid = lock_or_log(&self.grid, "grid::ffi_with_grid");
         f(&grid)
     }
 }
@@ -62,7 +64,7 @@ pub unsafe extern "C" fn grid_apply_action(
         }
     };
 
-    let mut grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let mut grid = lock_or_log(&handle.grid, "grid::ffi_apply_action");
     grid.apply_action(&action);
     1
 }
@@ -84,7 +86,7 @@ pub unsafe extern "C" fn grid_get_cell(
         return 0;
     }
     let handle = unsafe { &*handle };
-    let grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let grid = lock_or_log(&handle.grid, "grid::ffi_get_cell");
 
     let screen = grid.active_screen();
     if row >= screen.rows.len() || col >= screen.cols {
@@ -116,7 +118,7 @@ pub unsafe extern "C" fn grid_get_cursor(handle: *mut GridHandle) -> u64 {
         return 0;
     }
     let handle = unsafe { &*handle };
-    let grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let grid = lock_or_log(&handle.grid, "grid::ffi_get_cursor");
     let cursor = &grid.cursor;
     ((cursor.row as u64) << 32) | (cursor.col as u64)
 }
@@ -135,7 +137,7 @@ pub unsafe extern "C" fn grid_resize(
         return 0;
     }
     let handle = unsafe { &*handle };
-    let mut grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let mut grid = lock_or_log(&handle.grid, "grid::ffi_resize");
     grid.resize(rows as usize, cols as usize);
     1
 }
@@ -150,7 +152,7 @@ pub unsafe extern "C" fn grid_scroll_viewport(handle: *mut GridHandle, offset: u
         return;
     }
     let handle = unsafe { &*handle };
-    let mut grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let mut grid = lock_or_log(&handle.grid, "grid::ffi_scroll_viewport");
     grid.scroll_viewport(offset as usize);
 }
 
@@ -170,7 +172,7 @@ pub unsafe extern "C" fn grid_select(
         return;
     }
     let handle = unsafe { &*handle };
-    let mut grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let mut grid = lock_or_log(&handle.grid, "grid::ffi_select");
 
     if start_row == u32::MAX && end_row == u32::MAX {
         grid.clear_selection();
@@ -199,7 +201,7 @@ pub unsafe extern "C" fn grid_get_selection_text(
         return 0;
     }
     let handle = unsafe { &*handle };
-    let grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let grid = lock_or_log(&handle.grid, "grid::ffi_get_selection_text");
 
     let text = match grid.get_selection_text() {
         Some(t) => t,
@@ -230,7 +232,7 @@ pub unsafe extern "C" fn grid_get_dirty_rows(
         return 0;
     }
     let handle = unsafe { &*handle };
-    let grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let grid = lock_or_log(&handle.grid, "grid::ffi_get_dirty_rows");
     let dirty = grid.get_dirty_rows();
     let out = unsafe { std::slice::from_raw_parts_mut(out_buf, out_buf_len) };
     let mut count = 0;
@@ -256,7 +258,7 @@ pub unsafe extern "C" fn grid_clear_dirty(handle: *mut GridHandle) {
         return;
     }
     let handle = unsafe { &*handle };
-    let mut grid = handle.grid.lock().unwrap_or_else(|e| e.into_inner());
+    let mut grid = lock_or_log(&handle.grid, "grid::ffi_clear_dirty");
     grid.clear_dirty();
 }
 

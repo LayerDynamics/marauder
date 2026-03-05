@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use deno_core::op2;
 use deno_core::OpState;
+use marauder_event_bus::lock_or_log;
 
 use crate::manager::{PaneId, PtyConfig, PtyManager};
 use crate::pty;
@@ -50,7 +51,7 @@ pub fn op_pty_create(
     #[smi] cols: u32,
 ) -> Result<u32, PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::op_create");
 
     let config = PtyConfig {
         shell: shell.unwrap_or_else(pty::default_shell),
@@ -76,7 +77,7 @@ pub fn op_pty_write(
     #[buffer] data: &[u8],
 ) -> Result<(), PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::op_write");
     mgr.write(pane_id as PaneId, data)?;
     Ok(())
 }
@@ -93,7 +94,7 @@ pub fn op_pty_read(
 ) -> Result<Vec<u8>, PtyOpError> {
     let capped = max_bytes.min(MAX_READ_BYTES);
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::op_read");
     let mut buf = vec![0u8; capped as usize];
     let n = mgr.read(pane_id as PaneId, &mut buf)?;
     buf.truncate(n);
@@ -108,7 +109,7 @@ pub fn op_pty_resize(
     #[smi] cols: u32,
 ) -> Result<(), PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::op_resize");
     mgr.resize(pane_id as PaneId, rows as u16, cols as u16)?;
     Ok(())
 }
@@ -119,7 +120,7 @@ pub fn op_pty_close(
     #[smi] pane_id: u32,
 ) -> Result<(), PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::op_close");
     mgr.close(pane_id as PaneId)?;
     Ok(())
 }
@@ -131,7 +132,7 @@ pub fn op_pty_get_pid(
     #[smi] pane_id: u32,
 ) -> Result<u32, PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mgr = lock_or_log(&mgr, "pty::op_get_pid");
     let pid = mgr.get_pid(pane_id as PaneId)?;
     Ok(pid.unwrap_or(0))
 }
@@ -143,7 +144,7 @@ pub fn op_pty_wait(
     #[smi] pane_id: u32,
 ) -> Result<i32, PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&mgr, "pty::op_wait");
     match mgr.try_wait(pane_id as PaneId)? {
         Some(_) => Ok(1),
         None => Ok(0),
@@ -154,7 +155,7 @@ pub fn op_pty_wait(
 #[smi]
 pub fn op_pty_count(state: &mut OpState) -> Result<u32, PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
+    let mgr = lock_or_log(&mgr, "pty::op_count");
     Ok(mgr.count() as u32)
 }
 

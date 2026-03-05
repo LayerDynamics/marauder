@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use deno_core::op2;
 use deno_core::OpState;
+use marauder_event_bus::{lock_or_log, read_or_log, write_or_log};
 use serde_json::Value;
 
 use crate::store::{ConfigStore, SharedConfigStore};
@@ -39,7 +40,7 @@ fn init_config_state(state: &mut OpState) {
 /// Pre-registers it at the given handle.
 pub fn inject_shared_config_store(state: &mut OpState, handle: u32, store: SharedConfigStore) {
     let shared = state.borrow::<SharedConfigMap>().clone();
-    shared.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, store);
+    lock_or_log(&shared, "config::op_inject_shared").insert(handle, store);
 }
 
 fn with_config<R>(
@@ -49,24 +50,24 @@ fn with_config<R>(
 ) -> Result<R, ConfigOpError> {
     // Check shared config stores first (live runtime stores)
     let shared = state.borrow::<SharedConfigMap>().clone();
-    let shared_map = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let shared_map = lock_or_log(&shared, "config::with_config::shared_map");
     if let Some(store_arc) = shared_map.get(&handle) {
         let store_arc = store_arc.clone();
         drop(shared_map);
-        let mut store = store_arc.write().unwrap_or_else(|e| e.into_inner());
+        let mut store = write_or_log(&store_arc, "config::with_config::shared_store");
         return Ok(f(&mut store));
     }
     drop(shared_map);
 
     // Fall back to local config map
     let map = state.borrow::<ConfigMap>().clone();
-    let map_guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    let map_guard = lock_or_log(&map, "config::with_config::local_map");
     let store_arc = map_guard
         .get(&handle)
         .cloned()
         .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?;
     drop(map_guard);
-    let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = lock_or_log(&store_arc, "config::with_config::local_store");
     Ok(f(&mut store))
 }
 
@@ -75,13 +76,13 @@ fn with_config<R>(
 #[smi]
 pub fn op_config_create(state: &mut OpState) -> Result<u32, ConfigOpError> {
     let id_rc = state.borrow::<NextConfigId>().clone();
-    let mut id = id_rc.lock().unwrap_or_else(|e| e.into_inner());
+    let mut id = lock_or_log(&id_rc, "config::op_create::next_id");
     let handle = *id;
     *id = id.checked_add(1).ok_or_else(|| ConfigOpError("config handle ID overflow".to_string()))?;
     drop(id);
 
     let map = state.borrow::<ConfigMap>().clone();
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, Arc::new(Mutex::new(ConfigStore::new())));
+    lock_or_log(&map, "config::op_create::map").insert(handle, Arc::new(Mutex::new(ConfigStore::new())));
     Ok(handle)
 }
 
@@ -100,7 +101,7 @@ pub async fn op_config_load(
         let st = state.borrow();
         st.borrow::<SharedConfigMap>().clone()
     };
-    let shared_map = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let shared_map = lock_or_log(&shared, "config::op_load::shared_map");
     if let Some(store_arc) = shared_map.get(&handle) {
         let store_arc = store_arc.clone();
         drop(shared_map);
@@ -110,7 +111,7 @@ pub async fn op_config_load(
         let prj = if project.is_empty() { None } else { Some(std::path::PathBuf::from(&project)) };
 
         return tokio::task::spawn_blocking(move || {
-            let mut store = store_arc.write().unwrap_or_else(|e| e.into_inner());
+            let mut store = write_or_log(&store_arc, "config::op_load::shared_store");
             store.load(sys.as_deref(), usr.as_deref(), prj.as_deref())
                 .map_err(|e| ConfigOpError(e.to_string()))
         }).await.map_err(|e| ConfigOpError(e.to_string()))?;
@@ -121,7 +122,7 @@ pub async fn op_config_load(
     let store_arc = {
         let st = state.borrow();
         let map = st.borrow::<ConfigMap>().clone();
-        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock_or_log(&map, "config::op_load::local_map");
         map.get(&handle)
             .cloned()
             .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?
@@ -132,7 +133,7 @@ pub async fn op_config_load(
     let prj = if project.is_empty() { None } else { Some(std::path::PathBuf::from(&project)) };
 
     tokio::task::spawn_blocking(move || {
-        let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = lock_or_log(&store_arc, "config::op_load::local_store");
         store.load(sys.as_deref(), usr.as_deref(), prj.as_deref())
             .map_err(|e| ConfigOpError(e.to_string()))
     }).await.map_err(|e| ConfigOpError(e.to_string()))?
@@ -172,12 +173,12 @@ pub async fn op_config_save(
         let st = state.borrow();
         st.borrow::<SharedConfigMap>().clone()
     };
-    let shared_map = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let shared_map = lock_or_log(&shared, "config::op_save::shared_map");
     if let Some(store_arc) = shared_map.get(&handle) {
         let store_arc = store_arc.clone();
         drop(shared_map);
         return tokio::task::spawn_blocking(move || {
-            let store = store_arc.read().unwrap_or_else(|e| e.into_inner());
+            let store = read_or_log(&store_arc, "config::op_save::shared_store");
             store.save_user_config(std::path::Path::new(&path))
                 .map_err(|e| ConfigOpError(e.to_string()))
         }).await.map_err(|e| ConfigOpError(e.to_string()))?;
@@ -187,14 +188,14 @@ pub async fn op_config_save(
     let store_arc = {
         let st = state.borrow();
         let map = st.borrow::<ConfigMap>().clone();
-        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock_or_log(&map, "config::op_save::local_map");
         map.get(&handle)
             .cloned()
             .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?
     };
 
     tokio::task::spawn_blocking(move || {
-        let store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let store = lock_or_log(&store_arc, "config::op_save::local_store");
         store.save_user_config(std::path::Path::new(&path))
             .map_err(|e| ConfigOpError(e.to_string()))
     }).await.map_err(|e| ConfigOpError(e.to_string()))?
@@ -211,12 +212,12 @@ pub async fn op_config_reload(
         let st = state.borrow();
         st.borrow::<SharedConfigMap>().clone()
     };
-    let shared_map = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let shared_map = lock_or_log(&shared, "config::op_reload::shared_map");
     if let Some(store_arc) = shared_map.get(&handle) {
         let store_arc = store_arc.clone();
         drop(shared_map);
         return tokio::task::spawn_blocking(move || {
-            let mut store = store_arc.write().unwrap_or_else(|e| e.into_inner());
+            let mut store = write_or_log(&store_arc, "config::op_reload::shared_store");
             store.reload().map_err(|e| ConfigOpError(e.to_string()))
         }).await.map_err(|e| ConfigOpError(e.to_string()))?;
     }
@@ -225,14 +226,14 @@ pub async fn op_config_reload(
     let store_arc = {
         let st = state.borrow();
         let map = st.borrow::<ConfigMap>().clone();
-        let map = map.lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock_or_log(&map, "config::op_reload::local_map");
         map.get(&handle)
             .cloned()
             .ok_or_else(|| ConfigOpError(format!("invalid config handle: {handle}")))?
     };
 
     tokio::task::spawn_blocking(move || {
-        let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = lock_or_log(&store_arc, "config::op_reload::local_store");
         store.reload().map_err(|e| ConfigOpError(e.to_string()))
     }).await.map_err(|e| ConfigOpError(e.to_string()))?
 }
@@ -257,10 +258,10 @@ pub fn op_config_destroy(
 ) -> Result<(), ConfigOpError> {
     {
         let shared = state.borrow::<SharedConfigMap>().clone();
-        shared.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        lock_or_log(&shared, "config::op_destroy::shared_map").remove(&handle);
     }
     let map = state.borrow::<ConfigMap>().clone();
-    map.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+    lock_or_log(&map, "config::op_destroy::local_map").remove(&handle);
     Ok(())
 }
 
@@ -299,12 +300,12 @@ mod tests {
     /// mirroring the logic in op_config_create.
     fn create_store(state: &mut OpState) -> Result<u32, ConfigOpError> {
         let id_rc = state.borrow::<NextConfigId>().clone();
-        let mut id = id_rc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut id = lock_or_log(&id_rc, "test::create_store::next_id");
         let handle = *id;
         *id = id.checked_add(1).ok_or_else(|| ConfigOpError("config handle ID overflow".to_string()))?;
         drop(id);
         let map = state.borrow::<ConfigMap>().clone();
-        map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, Arc::new(Mutex::new(ConfigStore::new())));
+        lock_or_log(&map, "test::create_store::map").insert(handle, Arc::new(Mutex::new(ConfigStore::new())));
         Ok(handle)
     }
 
@@ -329,10 +330,10 @@ mod tests {
     fn destroy_store(state: &mut OpState, handle: u32) -> Result<(), ConfigOpError> {
         {
             let shared = state.borrow::<SharedConfigMap>().clone();
-            shared.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+            lock_or_log(&shared, "test::destroy_store::shared_map").remove(&handle);
         }
         let map = state.borrow::<ConfigMap>().clone();
-        map.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        lock_or_log(&map, "test::destroy_store::local_map").remove(&handle);
         Ok(())
     }
 

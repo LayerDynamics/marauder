@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use deno_core::op2;
 use deno_core::OpState;
+use marauder_event_bus::lock_or_log;
 
 use crate::cell::Cell;
 use crate::grid::Grid;
@@ -32,7 +33,7 @@ fn init_grid_state(state: &mut OpState) {
 /// The grid ops will prefer this live-shared grid over the local grid map.
 pub fn inject_shared_grid(state: &mut OpState, handle: u32, grid: Arc<Mutex<Grid>>) {
     let shared_grids = state.borrow::<SharedGridMap>().clone();
-    shared_grids.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, grid);
+    lock_or_log(&shared_grids, "grid::ops_inject_shared_grid").insert(handle, grid);
 }
 
 fn with_grid<R>(
@@ -42,18 +43,18 @@ fn with_grid<R>(
 ) -> Result<R, GridOpError> {
     // First check shared grids (live runtime grids)
     let shared_grids = state.borrow::<SharedGridMap>().clone();
-    let shared = shared_grids.lock().unwrap_or_else(|e| e.into_inner());
+    let shared = lock_or_log(&shared_grids, "grid::ops_with_grid_shared");
     if let Some(grid_arc) = shared.get(&handle) {
         let grid_arc = grid_arc.clone();
         drop(shared);
-        let mut grid = grid_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut grid = lock_or_log(&grid_arc, "grid::ops_with_grid_live");
         return Ok(f(&mut grid));
     }
     drop(shared);
 
     // Fall back to local grid map
     let map = state.borrow::<GridMap>().clone();
-    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = lock_or_log(&map, "grid::ops_with_grid_local");
     let grid = map
         .get_mut(&handle)
         .ok_or_else(|| GridOpError(format!("invalid grid handle: {handle}")))?;
@@ -69,13 +70,13 @@ pub fn op_grid_create(
     #[smi] cols: u32,
 ) -> Result<u32, GridOpError> {
     let id_rc = state.borrow::<NextGridId>().clone();
-    let mut id = id_rc.lock().unwrap_or_else(|e| e.into_inner());
+    let mut id = lock_or_log(&id_rc, "grid::ops_create_id");
     let handle = *id;
     *id = id.checked_add(1).ok_or_else(|| GridOpError("grid handle ID overflow".to_string()))?;
     drop(id);
 
     let map = state.borrow::<GridMap>().clone();
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, Grid::new(rows as usize, cols as usize));
+    lock_or_log(&map, "grid::ops_create_insert").insert(handle, Grid::new(rows as usize, cols as usize));
     Ok(handle)
 }
 
@@ -214,11 +215,11 @@ pub fn op_grid_destroy(
     // Remove from shared grids first
     {
         let shared = state.borrow::<SharedGridMap>().clone();
-        shared.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        lock_or_log(&shared, "grid::ops_destroy_shared").remove(&handle);
     }
     // Then from local map (may not exist if it was only in shared)
     let map = state.borrow::<GridMap>().clone();
-    let removed = map.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+    let removed = lock_or_log(&map, "grid::ops_destroy_local").remove(&handle);
     if removed.is_none() {
         // Check if it was in shared — if not found in either, error
         // (Already removed from shared above, so just return ok since it was found there)
@@ -263,12 +264,12 @@ mod tests {
     /// Create a grid by directly manipulating state maps (bypasses #[op2] macro).
     fn create_grid(state: &mut OpState, rows: usize, cols: usize) -> Result<u32, GridOpError> {
         let id_rc = state.borrow::<NextGridId>().clone();
-        let mut id = id_rc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut id = lock_or_log(&id_rc, "grid::test_create_id");
         let handle = *id;
         *id = id.checked_add(1).ok_or_else(|| GridOpError("grid handle ID overflow".to_string()))?;
         drop(id);
         let map = state.borrow::<GridMap>().clone();
-        map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, Grid::new(rows, cols));
+        lock_or_log(&map, "grid::test_create_insert").insert(handle, Grid::new(rows, cols));
         Ok(handle)
     }
 
@@ -314,10 +315,10 @@ mod tests {
     fn destroy_grid(state: &mut OpState, handle: u32) -> Result<(), GridOpError> {
         {
             let shared = state.borrow::<SharedGridMap>().clone();
-            shared.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+            lock_or_log(&shared, "grid::test_destroy_shared").remove(&handle);
         }
         let map = state.borrow::<GridMap>().clone();
-        map.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        lock_or_log(&map, "grid::test_destroy_local").remove(&handle);
         Ok(())
     }
 
