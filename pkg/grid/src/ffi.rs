@@ -8,6 +8,17 @@ pub struct GridHandle {
     grid: Mutex<Grid>,
 }
 
+impl GridHandle {
+    /// Access the grid under the lock. Used by `pkg/compute` to read cell data.
+    pub fn with_grid<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Grid) -> R,
+    {
+        let grid = self.grid.lock().unwrap_or_else(|e| e.into_inner());
+        f(&grid)
+    }
+}
+
 /// Create a new grid. Returns an opaque handle.
 ///
 /// # Safety
