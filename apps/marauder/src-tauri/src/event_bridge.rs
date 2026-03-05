@@ -140,8 +140,30 @@ pub fn event_bus_emit(
     Ok(())
 }
 
+/// Maximum number of webview subscriptions to prevent resource exhaustion.
+const MAX_WEBVIEW_SUBSCRIPTIONS: usize = 256;
+
+/// Tauri command: start the server-push event bridge.
+/// The webview calls this once at startup, passing a Channel that receives
+/// all non-hot-path events (defined in BRIDGE_EVENT_TYPES) for the lifetime
+/// of the application.
+#[tauri::command]
+pub fn event_bus_start_bridge(
+    state: tauri::State<'_, SharedEventBus>,
+    bridge_state: tauri::State<'_, Mutex<Option<TauriBridge>>>,
+    channel: Channel<String>,
+) -> Result<(), String> {
+    let mut slot = bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_some() {
+        return Err("Event bridge already started".to_string());
+    }
+    *slot = Some(TauriBridge::new((*state).clone(), channel));
+    tracing::info!("TauriBridge started — forwarding {} event types to webview", BRIDGE_EVENT_TYPES.len());
+    Ok(())
+}
+
 /// Tauri command: subscribe to events via a streaming Channel.
-/// Returns subscriber IDs are tracked internally for cleanup.
+/// Returns subscriber IDs that are tracked internally for cleanup.
 #[tauri::command]
 pub fn event_bus_subscribe_channel(
     state: tauri::State<'_, SharedEventBus>,
@@ -151,6 +173,15 @@ pub fn event_bus_subscribe_channel(
 ) -> Result<Vec<u64>, String> {
     let mut ids = Vec::new();
     let mut tracked = subs_state.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+    if tracked.len() + event_types.len() > MAX_WEBVIEW_SUBSCRIPTIONS {
+        return Err(format!(
+            "Subscription limit exceeded: {} active + {} requested > {} max",
+            tracked.len(),
+            event_types.len(),
+            MAX_WEBVIEW_SUBSCRIPTIONS
+        ));
+    }
 
     for et_u32 in event_types {
         let et = EventType::from_u32(et_u32).map_err(|e| e.to_string())?;
