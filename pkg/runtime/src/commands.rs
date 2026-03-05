@@ -27,7 +27,7 @@ where
     F: FnOnce(&mut MarauderRuntime) -> Result<T, String>,
 {
     let rt_arc = state.inner.get().ok_or("Runtime not initialized")?;
-    let mut rt = lock_or_log(&rt_arc, "runtime::cmd with_runtime");
+    let mut rt = lock_or_log(rt_arc.as_ref(), "runtime::cmd with_runtime");
     f(&mut rt)
 }
 
@@ -37,7 +37,7 @@ pub fn runtime_cmd_state(
 ) -> Result<String, String> {
     match state.inner.get() {
         Some(rt_arc) => {
-            let rt = lock_or_log(&rt_arc, "runtime::cmd_state");
+            let rt = lock_or_log(rt_arc.as_ref(), "runtime::cmd_state");
             Ok(format!("{:?}", rt.state()))
         }
         None => Ok("NotInitialized".to_string()),
@@ -69,7 +69,7 @@ pub fn runtime_cmd_create_pane(
         // Synchronously register the pipeline's grid so it's immediately
         // queryable by grid_cmd_* commands when this call returns.
         if let Some(pipeline) = rt.pipeline(pane_id) {
-            lock_or_log(&pane_grids, "runtime::cmd_create_pane grid_insert")
+            lock_or_log(pane_grids.as_ref(), "runtime::cmd_create_pane grid_insert")
                 .insert(pane_id, Arc::clone(&pipeline.grid));
         }
 
@@ -88,7 +88,7 @@ pub fn runtime_cmd_close_pane(
         rt.close_pane(pane_id).map_err(|e| e.to_string())?;
 
         // Remove the grid entry so stale pane IDs don't linger.
-        lock_or_log(&pane_grids, "runtime::cmd_close_pane grid_remove")
+        lock_or_log(pane_grids.as_ref(), "runtime::cmd_close_pane grid_remove")
             .remove(&pane_id);
 
         Ok(())

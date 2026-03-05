@@ -120,16 +120,21 @@ pub fn config_cmd_save(
 ) -> Result<(), String> {
     let requested = PathBuf::from(&path);
 
+    // Reject paths without a filename component (bare directories, empty, etc.)
+    let file_name = requested
+        .file_name()
+        .filter(|f| !f.is_empty())
+        .ok_or("Config save path must include a filename")?;
+
     // Resolve to absolute path to prevent traversal via ../ or symlinks
     let canonical_requested = requested
         .canonicalize()
         .or_else(|_| {
             // File may not exist yet — canonicalize the parent directory instead
-            if let Some(parent) = requested.parent() {
-                parent.canonicalize().map(|p| p.join(requested.file_name().unwrap_or_default()))
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory"))
-            }
+            requested
+                .parent()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory"))
+                .and_then(|parent| parent.canonicalize().map(|p| p.join(file_name)))
         })
         .map_err(|e| format!("Invalid config path: {e}"))?;
 
