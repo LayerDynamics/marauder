@@ -8,10 +8,10 @@ pub enum DenoRequest {
         code: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
-    /// Call a registered `#[op2]` by name with JSON-encoded args.
+    /// Call a registered `#[op2]` by name with JSON args array.
     CallOp {
         op_name: String,
-        args: String,
+        args: Vec<serde_json::Value>,
         reply: oneshot::Sender<Result<String, String>>,
     },
 }
@@ -43,7 +43,7 @@ const DENO_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 async fn await_reply(rx: oneshot::Receiver<Result<String, String>>) -> Result<String, String> {
     match tokio::time::timeout(DENO_REPLY_TIMEOUT, rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(_)) => Err("Deno runtime dropped the reply channel".to_string()),
+        Ok(Err(e)) => Err(format!("Deno runtime dropped the reply channel: {}", e)),
         Err(_) => Err("Deno runtime did not respond within 30s".to_string()),
     }
 }
@@ -88,32 +88,19 @@ pub async fn deno_eval(
     Err("deno_eval is disabled in release builds".to_string())
 }
 
-/// Validate that `args` is a comma-separated list of well-formed JSON values.
-/// Empty string is allowed (no args). Rejects anything that isn't valid JSON,
-/// preventing JS injection through the format string in the runtime loop.
-fn validate_json_args(args: &str) -> Result<(), String> {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        return Ok(());
-    }
-    // Wrap in an array so "1, \"hello\", true" becomes "[1, \"hello\", true]"
-    let as_array = format!("[{}]", trimmed);
-    serde_json::from_str::<serde_json::Value>(&as_array)
-        .map_err(|e| format!("Invalid JSON args: {}", e))?;
-    Ok(())
-}
-
-/// Tauri command: call a registered op by name with JSON args.
+/// Tauri command: call a registered op by name with a JSON args array.
+///
+/// Accepts a `Vec<serde_json::Value>` directly from Tauri's JSON deserialization,
+/// eliminating the need for manual comma-separated string building and validation.
 #[tauri::command]
 pub async fn deno_call_op(
     state: tauri::State<'_, DenoBridge>,
     op_name: String,
-    args: String,
+    args: Vec<serde_json::Value>,
 ) -> Result<String, String> {
     if !is_op_allowed(&op_name) {
         return Err(format!("Op '{}' is not in the allowlist", op_name));
     }
-    validate_json_args(&args)?;
 
     let (reply_tx, reply_rx) = oneshot::channel();
     state
@@ -151,21 +138,4 @@ mod tests {
         assert!(!is_op_allowed(""));
     }
 
-    #[test]
-    fn test_validate_json_args() {
-        // Valid cases
-        assert!(validate_json_args("").is_ok());
-        assert!(validate_json_args("  ").is_ok());
-        assert!(validate_json_args("42").is_ok());
-        assert!(validate_json_args(r#""hello""#).is_ok());
-        assert!(validate_json_args("true, 42").is_ok());
-        assert!(validate_json_args(r#""a", 1, null, [1,2]"#).is_ok());
-        assert!(validate_json_args(r#"{"key": "value"}"#).is_ok());
-
-        // Injection attempts
-        assert!(validate_json_args("); malicious_code(//").is_err());
-        assert!(validate_json_args("1); eval('pwned');//").is_err());
-        assert!(validate_json_args("function(){return 1}").is_err());
-        assert!(validate_json_args("undefined").is_err()); // not valid JSON
-    }
 }

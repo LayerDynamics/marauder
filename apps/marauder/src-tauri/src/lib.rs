@@ -395,10 +395,15 @@ pub fn run() {
                                         }
                                     }
                                     ipc_bridge::DenoRequest::CallOp { op_name, args, reply } => {
+                                        let args_js = args
+                                            .iter()
+                                            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".into()))
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
                                         let js = format!(
                                             "JSON.stringify(Deno.core.ops.{}({}))",
                                             op_name,
-                                            args
+                                            args_js
                                         );
                                         let result = js_runtime
                                             .execute_script("<call_op>", deno_core::FastString::from(js));

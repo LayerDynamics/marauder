@@ -19,10 +19,12 @@ export class EventBusClient {
   private subscriberIds: Map<EventTypeValue, number[]> = new Map();
   /** Map subscriber ID → Channel so channels are pruned on unsubscribe. */
   private channelBySubscriber: Map<number, Channel<string>> = new Map();
+  /** Retained reference to the bridge channel to prevent GC. */
+  private bridgeChannel?: Channel<string>;
 
   /**
    * Start the server-push event bridge (call once at startup).
-   * Returns a Channel that receives all non-hot-path events.
+   * The channel is retained on the instance for the app lifetime.
    */
   async startBridge(callback: (event: BusEvent) => void): Promise<void> {
     const channel = new Channel<string>();
@@ -34,6 +36,7 @@ export class EventBusClient {
         console.error("EventBusClient: failed to parse bridge event", e);
       }
     };
+    this.bridgeChannel = channel;
     await invoke("event_bus_start_bridge", { channel });
   }
 
@@ -110,6 +113,7 @@ export class EventBusClient {
     }
     this.subscriberIds.clear();
     this.channelBySubscriber.clear();
+    this.bridgeChannel = undefined;
   }
 
   [Symbol.dispose](): void {
@@ -250,10 +254,20 @@ export class DenoClient {
 
   /** Call a registered #[op2] by name with positional args. */
   async callOp(opName: string, args: unknown[] = []): Promise<unknown> {
-    const argsJson = args.map((a) => JSON.stringify(a)).join(", ");
+    // Validate all args are JSON-serializable before sending
+    const sanitized = args.map((a, i) => {
+      const s = JSON.stringify(a);
+      if (s === undefined) {
+        throw new Error(
+          `Argument at index ${i} is not JSON-serializable (undefined, function, or symbol)`,
+        );
+      }
+      return JSON.parse(s);
+    });
+
     const result: string = await invoke("deno_call_op", {
       op_name: opName,
-      args: argsJson,
+      args: sanitized,
     });
     try {
       return JSON.parse(result);
