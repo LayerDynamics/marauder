@@ -4,6 +4,7 @@ pub mod store;
 pub mod watcher;
 pub mod ffi;
 pub mod bindgen;
+pub mod ops;
 
 pub use layer::{ConfigError, ConfigLayer, LayerKind};
 pub use store::{ConfigStore, SharedConfigStore};

@@ -119,9 +119,22 @@ pub unsafe extern "C" fn event_bus_publish(
         unsafe { std::slice::from_raw_parts(payload, payload_len) }
     };
 
+    // Validate payload is well-formed JSON before publishing
+    let payload_vec = if payload_slice.is_empty() {
+        vec![]
+    } else {
+        match serde_json::from_slice::<serde_json::Value>(payload_slice) {
+            Ok(v) => match serde_json::to_vec(&v) {
+                Ok(bytes) => bytes,
+                Err(_) => return 0,
+            },
+            Err(_) => return 0,
+        }
+    };
+
     let event = Event {
         event_type,
-        payload: payload_slice.to_vec(),
+        payload: payload_vec,
         timestamp_us: Event::now_us(),
         source: None,
     };

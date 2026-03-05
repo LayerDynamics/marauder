@@ -3,10 +3,9 @@
 //! These ops allow the Deno runtime embedded in Tauri to interact with
 //! PTY sessions directly through V8, without going through FFI.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use deno_core::op2;
 use deno_core::OpState;
@@ -27,11 +26,18 @@ impl From<anyhow::Error> for PtyOpError {
 }
 
 /// State key for the PtyManager stored in OpState.
-type SharedPtyManager = Rc<RefCell<PtyManager>>;
+/// Uses Arc<Mutex<>> for thread-safe sharing with the real runtime.
+type SharedPtyManager = Arc<Mutex<PtyManager>>;
 
 /// Initialize PtyManager in the OpState.
 pub fn init_pty_state(state: &mut OpState) {
-    state.put::<SharedPtyManager>(Rc::new(RefCell::new(PtyManager::new())));
+    state.put::<SharedPtyManager>(Arc::new(Mutex::new(PtyManager::new())));
+}
+
+/// Inject a shared PtyManager from the real runtime into OpState,
+/// replacing the default disconnected instance.
+pub fn inject_shared_pty_manager(state: &mut OpState, mgr: Arc<Mutex<PtyManager>>) {
+    state.put::<SharedPtyManager>(mgr);
 }
 
 #[op2]
@@ -44,7 +50,7 @@ pub fn op_pty_create(
     #[smi] cols: u32,
 ) -> Result<u32, PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.borrow_mut();
+    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
 
     let config = PtyConfig {
         shell: shell.unwrap_or_else(pty::default_shell),
@@ -70,7 +76,7 @@ pub fn op_pty_write(
     #[buffer] data: &[u8],
 ) -> Result<(), PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.borrow_mut();
+    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
     mgr.write(pane_id as PaneId, data)?;
     Ok(())
 }
@@ -87,7 +93,7 @@ pub fn op_pty_read(
 ) -> Result<Vec<u8>, PtyOpError> {
     let capped = max_bytes.min(MAX_READ_BYTES);
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.borrow_mut();
+    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
     let mut buf = vec![0u8; capped as usize];
     let n = mgr.read(pane_id as PaneId, &mut buf)?;
     buf.truncate(n);
@@ -102,7 +108,7 @@ pub fn op_pty_resize(
     #[smi] cols: u32,
 ) -> Result<(), PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.borrow_mut();
+    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
     mgr.resize(pane_id as PaneId, rows as u16, cols as u16)?;
     Ok(())
 }
@@ -113,7 +119,7 @@ pub fn op_pty_close(
     #[smi] pane_id: u32,
 ) -> Result<(), PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.borrow_mut();
+    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
     mgr.close(pane_id as PaneId)?;
     Ok(())
 }
@@ -125,7 +131,7 @@ pub fn op_pty_get_pid(
     #[smi] pane_id: u32,
 ) -> Result<u32, PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mgr = mgr.borrow();
+    let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
     let pid = mgr.get_pid(pane_id as PaneId)?;
     Ok(pid.unwrap_or(0))
 }
@@ -137,7 +143,7 @@ pub fn op_pty_wait(
     #[smi] pane_id: u32,
 ) -> Result<i32, PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mut mgr = mgr.borrow_mut();
+    let mut mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
     match mgr.try_wait(pane_id as PaneId)? {
         Some(_) => Ok(1),
         None => Ok(0),
@@ -148,7 +154,7 @@ pub fn op_pty_wait(
 #[smi]
 pub fn op_pty_count(state: &mut OpState) -> Result<u32, PtyOpError> {
     let mgr = state.borrow::<SharedPtyManager>().clone();
-    let mgr = mgr.borrow();
+    let mgr = mgr.lock().unwrap_or_else(|e| e.into_inner());
     Ok(mgr.count() as u32)
 }
 

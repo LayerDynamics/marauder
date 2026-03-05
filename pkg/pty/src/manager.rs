@@ -61,7 +61,8 @@ impl PtyManager {
     pub fn create(&mut self, config: PtyConfig) -> anyhow::Result<PaneId> {
         let result = pty::open_pty(&config)?;
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("PTY pane ID overflow"))?;
 
         self.sessions.insert(id, PtySession {
             master: result.master,
