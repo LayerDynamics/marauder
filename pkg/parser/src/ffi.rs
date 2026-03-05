@@ -1,6 +1,8 @@
 use std::ffi::c_void;
 use std::sync::Mutex;
 
+use marauder_event_bus::lock_or_log;
+
 use crate::performer::MarauderParser;
 
 /// Opaque handle for FFI consumers.
@@ -46,7 +48,7 @@ pub unsafe extern "C" fn parser_feed(
     let handle = unsafe { &*handle };
     let bytes = unsafe { std::slice::from_raw_parts(input, input_len) };
 
-    let mut parser = handle.parser.lock().unwrap_or_else(|e| e.into_inner());
+    let mut parser = lock_or_log(&handle.parser, "parser::ffi_feed");
     parser.feed(bytes, |action| {
         if let Ok(json) = serde_json::to_vec(&action) {
             callback(json.as_ptr(), json.len(), user_data);
@@ -64,7 +66,7 @@ pub unsafe extern "C" fn parser_reset(handle: *mut ParserHandle) {
         return;
     }
     let handle = unsafe { &*handle };
-    let mut parser = handle.parser.lock().unwrap_or_else(|e| e.into_inner());
+    let mut parser = lock_or_log(&handle.parser, "parser::ffi_reset");
     *parser = MarauderParser::new();
 }
 

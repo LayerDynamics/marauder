@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use marauder_event_bus::lock_or_log;
 use serde::{Deserialize, Serialize};
 
 use crate::manager::{PaneId, PtyConfig, PtyManager};
@@ -62,7 +63,7 @@ pub fn pty_cmd_create(
     state: tauri::State<'_, TauriPtyManager>,
     request: CreatePtyRequest,
 ) -> Result<PtyInfo, String> {
-    let mut mgr = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&state.inner, "pty::cmd_create");
 
     let config = PtyConfig {
         shell: request.shell.unwrap_or_else(pty::default_shell),
@@ -93,7 +94,7 @@ pub fn pty_cmd_write(
     pane_id: PaneId,
     data: Vec<u8>,
 ) -> Result<usize, String> {
-    let mut mgr = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&state.inner, "pty::cmd_write");
     mgr.write(pane_id, &data).map_err(|e| e.to_string())
 }
 
@@ -107,7 +108,7 @@ pub fn pty_cmd_read(
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
     let capped = max_bytes.min(MAX_READ_BYTES);
-    let mut mgr = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&state.inner, "pty::cmd_read");
     let mut buf = vec![0u8; capped];
     let n = mgr.read(pane_id, &mut buf).map_err(|e| e.to_string())?;
     buf.truncate(n);
@@ -121,7 +122,7 @@ pub fn pty_cmd_resize(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
-    let mut mgr = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&state.inner, "pty::cmd_resize");
     mgr.resize(pane_id, rows, cols).map_err(|e| e.to_string())
 }
 
@@ -130,7 +131,7 @@ pub fn pty_cmd_close(
     state: tauri::State<'_, TauriPtyManager>,
     pane_id: PaneId,
 ) -> Result<(), String> {
-    let mut mgr = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&state.inner, "pty::cmd_close");
     mgr.close(pane_id).map_err(|e| e.to_string())
 }
 
@@ -139,7 +140,7 @@ pub fn pty_cmd_get_pid(
     state: tauri::State<'_, TauriPtyManager>,
     pane_id: PaneId,
 ) -> Result<Option<u32>, String> {
-    let mgr = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let mgr = lock_or_log(&state.inner, "pty::cmd_get_pid");
     mgr.get_pid(pane_id).map_err(|e| e.to_string())
 }
 
@@ -148,7 +149,7 @@ pub fn pty_cmd_wait(
     state: tauri::State<'_, TauriPtyManager>,
     pane_id: PaneId,
 ) -> Result<bool, String> {
-    let mut mgr = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let mut mgr = lock_or_log(&state.inner, "pty::cmd_wait");
     let status = mgr.try_wait(pane_id).map_err(|e| e.to_string())?;
     Ok(status.is_some())
 }
@@ -157,6 +158,6 @@ pub fn pty_cmd_wait(
 pub fn pty_cmd_list(
     state: tauri::State<'_, TauriPtyManager>,
 ) -> Result<Vec<PaneId>, String> {
-    let mgr = state.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let mgr = lock_or_log(&state.inner, "pty::cmd_list");
     Ok(mgr.list())
 }

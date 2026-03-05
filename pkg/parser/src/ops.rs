@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use deno_core::op2;
 use deno_core::OpState;
+use marauder_event_bus::lock_or_log;
 
 use crate::actions::TerminalAction;
 use crate::performer::MarauderParser;
@@ -31,7 +32,7 @@ fn init_parser_state(state: &mut OpState) {
 /// Inject a shared parser from the real runtime into OpState.
 pub fn inject_shared_parser(state: &mut OpState, handle: u32, parser: Arc<Mutex<MarauderParser>>) {
     let shared = state.borrow::<SharedParserMap>().clone();
-    shared.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, parser);
+    lock_or_log(&shared, "parser::inject_shared").insert(handle, parser);
 }
 
 fn with_parser<R>(
@@ -41,18 +42,18 @@ fn with_parser<R>(
 ) -> Result<R, ParserOpError> {
     // Check shared parsers first (live runtime parsers)
     let shared = state.borrow::<SharedParserMap>().clone();
-    let shared_map = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let shared_map = lock_or_log(&shared, "parser::with_parser shared_map");
     if let Some(parser_arc) = shared_map.get(&handle) {
         let parser_arc = parser_arc.clone();
         drop(shared_map);
-        let mut parser = parser_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut parser = lock_or_log(&parser_arc, "parser::with_parser instance");
         return Ok(f(&mut parser));
     }
     drop(shared_map);
 
     // Fall back to local parser map
     let map = state.borrow::<ParserMap>().clone();
-    let mut map = map.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = lock_or_log(&map, "parser::with_parser local_map");
     let parser = map
         .get_mut(&handle)
         .ok_or_else(|| ParserOpError(format!("invalid parser handle: {handle}")))?;
@@ -65,13 +66,13 @@ fn with_parser<R>(
 
 fn parser_create_impl(state: &mut OpState) -> Result<u32, ParserOpError> {
     let id_rc = state.borrow::<NextParserId>().clone();
-    let mut id = id_rc.lock().unwrap_or_else(|e| e.into_inner());
+    let mut id = lock_or_log(&id_rc, "parser::create next_id");
     let handle = *id;
     *id = id.checked_add(1).ok_or_else(|| ParserOpError("parser handle ID overflow".to_string()))?;
     drop(id);
 
     let map = state.borrow::<ParserMap>().clone();
-    map.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, MarauderParser::new());
+    lock_or_log(&map, "parser::create insert").insert(handle, MarauderParser::new());
     Ok(handle)
 }
 
@@ -97,11 +98,11 @@ fn parser_destroy_impl(state: &mut OpState, handle: u32) -> Result<(), ParserOpE
     // Remove from shared parsers first
     {
         let shared = state.borrow::<SharedParserMap>().clone();
-        shared.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        lock_or_log(&shared, "parser::destroy shared").remove(&handle);
     }
     // Then from local map
     let map = state.borrow::<ParserMap>().clone();
-    map.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+    lock_or_log(&map, "parser::destroy local").remove(&handle);
     Ok(())
 }
 

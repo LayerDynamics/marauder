@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock, Mutex};
 
 use crate::events::{Event, EventType};
 use crate::interceptor::{InterceptorAction, InterceptorId, RegisteredInterceptor, Interceptor};
+use crate::sync_util::{lock_or_log, read_or_log, write_or_log};
 
 /// Callback type for event subscribers.
 pub type SubscriberCallback = Arc<dyn Fn(&Event) + Send + Sync>;
@@ -59,7 +60,7 @@ impl EventBus {
     where
         F: Fn(&Event) + Send + Sync + 'static,
     {
-        let mut next_id = self.next_id.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next_id = lock_or_log(&self.next_id, "EventBus::subscribe/next_id");
         let id = SubscriberId(*next_id);
         *next_id += 1;
 
@@ -68,14 +69,14 @@ impl EventBus {
             callback: Arc::new(callback),
         };
 
-        let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+        let mut subs = write_or_log(&self.subscribers, "EventBus::subscribe/subscribers");
         subs.entry(event_type).or_default().push(subscriber);
         id
     }
 
     /// Unsubscribe by SubscriberId.
     pub fn unsubscribe(&self, event_type: EventType, id: SubscriberId) {
-        let mut subs = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
+        let mut subs = write_or_log(&self.subscribers, "EventBus::unsubscribe/subscribers");
         if let Some(list) = subs.get_mut(&event_type) {
             list.retain(|s| s.id != id);
         }
@@ -83,11 +84,11 @@ impl EventBus {
 
     /// Register an interceptor that can modify or suppress events. Returns an ID for removal.
     pub fn add_interceptor(&self, interceptor: Box<dyn Interceptor>) -> InterceptorId {
-        let mut next_id = self.next_id.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next_id = lock_or_log(&self.next_id, "EventBus::add_interceptor/next_id");
         let id = InterceptorId(*next_id);
         *next_id += 1;
 
-        let mut interceptors = self.interceptors.write().unwrap_or_else(|e| e.into_inner());
+        let mut interceptors = write_or_log(&self.interceptors, "EventBus::add_interceptor/interceptors");
         interceptors.push(RegisteredInterceptor::new(id, interceptor));
         interceptors.sort_by_key(|i| i.priority);
         id
@@ -95,13 +96,13 @@ impl EventBus {
 
     /// Get the number of subscribers for a given event type.
     pub fn subscriber_count(&self, event_type: EventType) -> usize {
-        let subs = self.subscribers.read().unwrap_or_else(|e| e.into_inner());
+        let subs = read_or_log(&self.subscribers, "EventBus::subscriber_count/subscribers");
         subs.get(&event_type).map_or(0, |list| list.len())
     }
 
     /// Remove an interceptor by its ID.
     pub fn remove_interceptor(&self, id: InterceptorId) {
-        let mut interceptors = self.interceptors.write().unwrap_or_else(|e| e.into_inner());
+        let mut interceptors = write_or_log(&self.interceptors, "EventBus::remove_interceptor/interceptors");
         interceptors.retain(|i| i.id != id);
     }
 
@@ -113,7 +114,7 @@ impl EventBus {
         // This prevents deadlock if an interceptor calls back into the bus.
         let mut current_event = event;
         let interceptor_snapshot: Vec<_> = {
-            let interceptors = self.interceptors.read().unwrap_or_else(|e| e.into_inner());
+            let interceptors = read_or_log(&self.interceptors, "EventBus::publish/interceptors");
             interceptors.iter().map(|reg| reg.interceptor_arc()).collect()
         };
         // Interceptor lock is now dropped — safe to call interceptors
@@ -132,7 +133,7 @@ impl EventBus {
 
         // Dispatch to subscribers — clone list under lock, drop lock, then invoke
         let subscriber_snapshot = {
-            let subs = self.subscribers.read().unwrap_or_else(|e| e.into_inner());
+            let subs = read_or_log(&self.subscribers, "EventBus::publish/subscribers");
             subs.get(&current_event.event_type).cloned().unwrap_or_default()
         };
         // Subscriber lock is now dropped — callbacks can safely call subscribe/unsubscribe/publish

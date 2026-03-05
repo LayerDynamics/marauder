@@ -23,11 +23,11 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 deno_core = { workspace = true }
 marauder-event-bus = { path = "../../../pkg/event-bus" }
-marauder-pty = { path = "../../../pkg/pty" }
+marauder-pty = { path = "../../../pkg/pty", features = ["tauri-commands"] }
 marauder-parser = { path = "../../../pkg/parser" }
-marauder-grid = { path = "../../../pkg/grid" }
+marauder-grid = { path = "../../../pkg/grid", features = ["tauri-commands"] }
 marauder-renderer = { path = "../../../pkg/renderer" }
 marauder-compute = { path = "../../../pkg/compute" }
-marauder-runtime = { path = "../../../pkg/runtime" }
-marauder-config-store = { path = "../../../pkg/config-store" }
+marauder-runtime = { path = "../../../pkg/runtime", features = ["tauri-commands"] }
+marauder-config-store = { path = "../../../pkg/config-store", features = ["tauri-commands"] }
 wgpu = { workspace = true }

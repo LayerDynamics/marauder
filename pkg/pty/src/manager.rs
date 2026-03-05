@@ -8,8 +8,8 @@ use marauder_event_bus::events::{Event, EventType};
 
 use crate::pty;
 
-/// Unique identifier for a pane's PTY session.
-pub type PaneId = u64;
+/// Re-export the canonical PaneId from event-bus.
+pub use marauder_event_bus::PaneId;
 
 /// Configuration for spawning a PTY.
 #[derive(Debug, Clone)]

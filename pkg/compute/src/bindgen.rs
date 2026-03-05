@@ -3,7 +3,7 @@
 use deno_bindgen::deno_bindgen;
 use std::sync::{Arc, Mutex};
 
-use marauder_event_bus::HandleRegistry;
+use marauder_event_bus::{lock_or_log, HandleRegistry};
 
 use crate::engine::ComputeEngine;
 use crate::types::GpuCell;
@@ -34,7 +34,7 @@ fn compute_bindgen_upload_cells(handle_id: u32, cells_json: &str, rows: u32, col
         Ok(c) => c,
         Err(_) => return 0,
     };
-    let mut engine = engine.lock().unwrap_or_else(|e| e.into_inner());
+    let mut engine = lock_or_log(&engine, "compute::bindgen");
     engine.upload_cells_raw(&cells, rows, cols);
     1
 }
@@ -46,7 +46,7 @@ fn compute_bindgen_search(handle_id: u32, pattern: &str) -> String {
         Some(e) => e,
         None => return "[]".to_string(),
     };
-    let engine = engine.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = lock_or_log(&engine, "compute::bindgen");
     match engine.search(pattern) {
         Ok(results) => serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string()),
         Err(_) => "[]".to_string(),
@@ -60,7 +60,7 @@ fn compute_bindgen_detect_urls(handle_id: u32, row_start: u32, row_end: u32) -> 
         Some(e) => e,
         None => return "[]".to_string(),
     };
-    let engine = engine.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = lock_or_log(&engine, "compute::bindgen");
     match engine.detect_urls(row_start, row_end) {
         Ok(results) => serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string()),
         Err(_) => "[]".to_string(),
@@ -74,7 +74,7 @@ fn compute_bindgen_highlight_cells(handle_id: u32) -> String {
         Some(e) => e,
         None => return "[]".to_string(),
     };
-    let engine = engine.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = lock_or_log(&engine, "compute::bindgen");
     match engine.highlight_cells() {
         Ok(results) => serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string()),
         Err(_) => "[]".to_string(),
@@ -94,7 +94,7 @@ fn compute_bindgen_extract_selection(
         Some(e) => e,
         None => return String::new(),
     };
-    let engine = engine.lock().unwrap_or_else(|e| e.into_inner());
+    let engine = lock_or_log(&engine, "compute::bindgen");
     match engine.extract_selection(start_row, start_col, end_row, end_col) {
         Ok(text) => text,
         Err(_) => String::new(),

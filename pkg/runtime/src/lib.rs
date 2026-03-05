@@ -7,6 +7,8 @@ pub mod ffi;
 pub mod bindgen;
 pub mod util;
 pub mod ops;
+#[cfg(feature = "tauri-commands")]
+pub mod commands;
 
 pub use config::RuntimeConfig;
 pub use error::RuntimeError;

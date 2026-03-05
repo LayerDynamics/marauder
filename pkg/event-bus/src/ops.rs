@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use crate::bus::{EventBus, SharedEventBus, SubscriberId};
 use crate::events::{Event, EventType};
 use crate::interceptor::{Interceptor, InterceptorAction, InterceptorId};
+use crate::sync_util::lock_or_log;
 
 /// Error type for event bus ops.
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -84,7 +85,7 @@ pub fn inject_shared_event_bus(state: &mut OpState, bus: SharedEventBus) {
 /// Allocate a unique handle for JS.
 fn next_handle(state: &mut OpState) -> u64 {
     let counter = state.borrow::<HandleCounter>().clone();
-    let mut c = counter.lock().unwrap_or_else(|e| e.into_inner());
+    let mut c = lock_or_log(&counter, "ops::next_handle/counter");
     let h = *c;
     *c += 1;
     h
@@ -141,7 +142,7 @@ fn event_bus_subscribe_impl(
     // Register the channel receiver in state
     {
         let subs = state.borrow::<SubscriptionMap>().clone();
-        subs.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, rx);
+        lock_or_log(&subs, "ops::subscribe/subscription_map").insert(handle, rx);
     }
 
     // Subscribe on the bus — callback sends into the channel
@@ -154,7 +155,7 @@ fn event_bus_subscribe_impl(
     // Track the SubscriberId for unsubscribe
     {
         let ids = state.borrow::<SubscriberIdMap>().clone();
-        ids.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, (et, sub_id));
+        lock_or_log(&ids, "ops::subscribe/subscriber_id_map").insert(handle, (et, sub_id));
     }
 
     Ok(handle)
@@ -166,12 +167,12 @@ fn event_bus_unsubscribe_impl(
 ) -> Result<(), EventBusOpError> {
     {
         let subs = state.borrow::<SubscriptionMap>().clone();
-        subs.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        lock_or_log(&subs, "ops::unsubscribe/subscription_map").remove(&handle);
     }
 
     let entry = {
         let ids = state.borrow::<SubscriberIdMap>().clone();
-        let result = ids.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        let result = lock_or_log(&ids, "ops::unsubscribe/subscriber_id_map").remove(&handle);
         result
     };
     if let Some((et, sub_id)) = entry {
@@ -196,12 +197,12 @@ fn event_bus_add_interceptor_impl(
 
     {
         let subs = state.borrow::<SubscriptionMap>().clone();
-        subs.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, rx);
+        lock_or_log(&subs, "ops::add_interceptor/subscription_map").insert(handle, rx);
     }
 
     {
         let ids = state.borrow::<InterceptorIdMap>().clone();
-        ids.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, interceptor_id);
+        lock_or_log(&ids, "ops::add_interceptor/interceptor_id_map").insert(handle, interceptor_id);
     }
 
     Ok(handle)
@@ -213,12 +214,12 @@ fn event_bus_remove_interceptor_impl(
 ) -> Result<(), EventBusOpError> {
     {
         let subs = state.borrow::<SubscriptionMap>().clone();
-        subs.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        lock_or_log(&subs, "ops::remove_interceptor/subscription_map").remove(&handle);
     }
 
     let entry = {
         let ids = state.borrow::<InterceptorIdMap>().clone();
-        let result = ids.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        let result = lock_or_log(&ids, "ops::remove_interceptor/interceptor_id_map").remove(&handle);
         result
     };
     if let Some(interceptor_id) = entry {
@@ -282,7 +283,7 @@ pub async fn op_event_bus_poll(
     let rx_opt = {
         let st = state.borrow();
         let subs = st.borrow::<SubscriptionMap>().clone();
-        let result = subs.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+        let result = lock_or_log(&subs, "ops::poll/subscription_map_remove").remove(&handle);
         result
     };
 
@@ -297,7 +298,7 @@ pub async fn op_event_bus_poll(
     {
         let st = state.borrow();
         let subs = st.borrow::<SubscriptionMap>().clone();
-        subs.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, rx);
+        lock_or_log(&subs, "ops::poll/subscription_map_reinsert").insert(handle, rx);
     }
 
     match result {

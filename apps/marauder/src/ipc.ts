@@ -8,6 +8,10 @@ import type {
   CreatePtyRequest,
   PtyInfo,
   EventTypeValue,
+  CellInfo,
+  CursorPosition,
+  GridDimensions,
+  ScreenSnapshot,
 } from "./types";
 
 /** Client for the event bus bridge. */
@@ -35,7 +39,7 @@ export class EventBusClient {
     this.channels.push(channel);
 
     const ids: number[] = await invoke("event_bus_subscribe_channel", {
-      eventTypes,
+      event_types: eventTypes,
       channel,
     });
 
@@ -55,8 +59,8 @@ export class EventBusClient {
     subscriberId: number
   ): Promise<void> {
     await invoke("event_bus_unsubscribe_channel", {
-      eventType,
-      subscriberId,
+      event_type: eventType,
+      subscriber_id: subscriberId,
     });
     const existing = this.subscriberIds.get(eventType);
     if (existing) {
@@ -71,7 +75,7 @@ export class EventBusClient {
 
   /** Emit an event from the webview (subject to allowlist). */
   async emit(eventType: EventTypeValue, payload: string): Promise<void> {
-    await invoke("event_bus_emit", { eventType, payload });
+    await invoke("event_bus_emit", { event_type: eventType, payload });
   }
 
   /** Clean up all active subscriptions. */
@@ -97,30 +101,134 @@ export class PtyClient {
   }
 
   async write(paneId: number, data: number[]): Promise<void> {
-    await invoke("pty_cmd_write", { paneId, data });
+    await invoke("pty_cmd_write", { pane_id: paneId, data });
   }
 
-  async read(paneId: number): Promise<number[]> {
-    return invoke("pty_cmd_read", { paneId });
+  async read(paneId: number, maxBytes: number = 65536): Promise<number[]> {
+    return invoke("pty_cmd_read", { pane_id: paneId, max_bytes: maxBytes });
   }
 
   async resize(paneId: number, rows: number, cols: number): Promise<void> {
-    await invoke("pty_cmd_resize", { paneId, rows, cols });
+    await invoke("pty_cmd_resize", { pane_id: paneId, rows, cols });
   }
 
   async close(paneId: number): Promise<void> {
-    await invoke("pty_cmd_close", { paneId });
+    await invoke("pty_cmd_close", { pane_id: paneId });
   }
 
   async getPid(paneId: number): Promise<number | null> {
-    return invoke("pty_cmd_get_pid", { paneId });
+    return invoke("pty_cmd_get_pid", { pane_id: paneId });
   }
 
   async wait(paneId: number): Promise<number | null> {
-    return invoke("pty_cmd_wait", { paneId });
+    return invoke("pty_cmd_wait", { pane_id: paneId });
   }
 
   async list(): Promise<PtyInfo[]> {
     return invoke("pty_cmd_list", {});
+  }
+}
+
+/** Client for config store commands. */
+export class ConfigClient {
+  async get(key: string): Promise<unknown | null> {
+    return invoke("config_cmd_get", { key });
+  }
+
+  async set(key: string, value: unknown): Promise<void> {
+    await invoke("config_cmd_set", { key, value });
+  }
+
+  async keys(): Promise<string[]> {
+    return invoke("config_cmd_keys", {});
+  }
+
+  async save(path: string): Promise<void> {
+    await invoke("config_cmd_save", { path });
+  }
+
+  async reload(): Promise<void> {
+    await invoke("config_cmd_reload", {});
+  }
+}
+
+/** Client for grid commands. */
+export class GridClient {
+  async getCursor(paneId: number): Promise<CursorPosition> {
+    return invoke("grid_cmd_get_cursor", { pane_id: paneId });
+  }
+
+  async getCell(paneId: number, row: number, col: number): Promise<CellInfo> {
+    return invoke("grid_cmd_get_cell", { pane_id: paneId, row, col });
+  }
+
+  async getSelectionText(paneId: number): Promise<string | null> {
+    return invoke("grid_cmd_get_selection_text", { pane_id: paneId });
+  }
+
+  async setSelection(
+    paneId: number,
+    startRow: number,
+    startCol: number,
+    endRow: number,
+    endCol: number
+  ): Promise<void> {
+    await invoke("grid_cmd_set_selection", {
+      pane_id: paneId,
+      start_row: startRow,
+      start_col: startCol,
+      end_row: endRow,
+      end_col: endCol,
+    });
+  }
+
+  async clearSelection(paneId: number): Promise<void> {
+    await invoke("grid_cmd_clear_selection", { pane_id: paneId });
+  }
+
+  async scrollViewport(paneId: number, offset: number): Promise<void> {
+    await invoke("grid_cmd_scroll_viewport", { pane_id: paneId, offset });
+  }
+
+  async scrollViewportBy(paneId: number, delta: number): Promise<void> {
+    await invoke("grid_cmd_scroll_viewport_by", { pane_id: paneId, delta });
+  }
+
+  async getScreenSnapshot(paneId: number): Promise<ScreenSnapshot> {
+    return invoke("grid_cmd_get_screen_snapshot", { pane_id: paneId });
+  }
+
+  async getDimensions(paneId: number): Promise<GridDimensions> {
+    return invoke("grid_cmd_get_dimensions", { pane_id: paneId });
+  }
+}
+
+/** Client for renderer commands. */
+export class RendererClient {
+  async getCellSize(): Promise<[number, number]> {
+    return invoke("renderer_get_cell_size", {});
+  }
+
+  async resize(width: number, height: number, scaleFactor: number): Promise<void> {
+    await invoke("renderer_resize", { width, height, scale_factor: scaleFactor });
+  }
+}
+
+/** Client for runtime commands. */
+export class RuntimeClient {
+  async state(): Promise<string> {
+    return invoke("runtime_cmd_state", {});
+  }
+
+  async paneIds(): Promise<number[]> {
+    return invoke("runtime_cmd_pane_ids", {});
+  }
+
+  async createPane(): Promise<number> {
+    return invoke("runtime_cmd_create_pane", {});
+  }
+
+  async closePane(paneId: number): Promise<void> {
+    await invoke("runtime_cmd_close_pane", { pane_id: paneId });
   }
 }

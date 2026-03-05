@@ -3,7 +3,7 @@
 use deno_bindgen::deno_bindgen;
 use std::sync::{Arc, Mutex};
 
-use marauder_event_bus::HandleRegistry;
+use marauder_event_bus::{lock_or_log, HandleRegistry};
 
 use crate::grid::Grid;
 use marauder_parser::TerminalAction;
@@ -31,7 +31,7 @@ fn grid_bindgen_apply_action(handle_id: u32, action_json: &str) -> u8 {
         Ok(a) => a,
         Err(_) => return 0,
     };
-    let mut grid = grid.lock().unwrap_or_else(|e| e.into_inner());
+    let mut grid = lock_or_log(&grid, "grid::bindgen_apply_action");
     grid.apply_action(&action);
     1
 }
@@ -43,7 +43,7 @@ fn grid_bindgen_get_cell(handle_id: u32, row: u32, col: u32) -> String {
         Some(g) => g,
         None => return String::new(),
     };
-    let grid = grid.lock().unwrap_or_else(|e| e.into_inner());
+    let grid = lock_or_log(&grid, "grid::bindgen_get_cell");
     let screen = grid.active_screen();
     let (r, c) = (row as usize, col as usize);
     if r >= screen.rows.len() || c >= screen.cols {
@@ -59,7 +59,7 @@ fn grid_bindgen_get_cursor(handle_id: u32) -> String {
         Some(g) => g,
         None => return String::new(),
     };
-    let grid = grid.lock().unwrap_or_else(|e| e.into_inner());
+    let grid = lock_or_log(&grid, "grid::bindgen_get_cursor");
     format!("{},{}", grid.cursor.row, grid.cursor.col)
 }
 
@@ -70,7 +70,7 @@ fn grid_bindgen_resize(handle_id: u32, rows: u32, cols: u32) {
         Some(g) => g,
         None => return,
     };
-    let mut grid = grid.lock().unwrap_or_else(|e| e.into_inner());
+    let mut grid = lock_or_log(&grid, "grid::bindgen_resize");
     grid.resize(rows as usize, cols as usize);
 }
 
@@ -81,7 +81,7 @@ fn grid_bindgen_get_selection_text(handle_id: u32) -> String {
         Some(g) => g,
         None => return String::new(),
     };
-    let grid = grid.lock().unwrap_or_else(|e| e.into_inner());
+    let grid = lock_or_log(&grid, "grid::bindgen_get_selection_text");
     grid.get_selection_text().unwrap_or_default()
 }
 
@@ -92,7 +92,7 @@ fn grid_bindgen_select(handle_id: u32, start_row: u32, start_col: u32, end_row: 
         Some(g) => g,
         None => return,
     };
-    let mut grid = grid.lock().unwrap_or_else(|e| e.into_inner());
+    let mut grid = lock_or_log(&grid, "grid::bindgen_select");
     if start_row == u32::MAX && end_row == u32::MAX {
         grid.clear_selection();
     } else {

@@ -77,19 +77,45 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// Reload config files from disk.
-    pub fn reload(&mut self) -> Result<(), ConfigError> {
-        let old_merged = self.merged.clone();
-        let system = self.system_path.clone();
-        let user = self.user_path.clone();
-        let project = self.project_path.clone();
-        self.load(
-            system.as_deref(),
-            user.as_deref(),
-            project.as_deref(),
-        )?;
+    /// Read config files from disk without holding any lock.
+    /// Returns the file-based layers that can later be applied via `apply_reload`.
+    pub fn read_layers_from_disk(&self) -> Result<Vec<ConfigLayer>, ConfigError> {
+        let file_layers = [
+            (self.system_path.as_deref(), LayerKind::System),
+            (self.user_path.as_deref(), LayerKind::User),
+            (self.project_path.as_deref(), LayerKind::Project),
+        ];
+
+        let mut loaded = Vec::new();
+        for (path_opt, kind) in &file_layers {
+            if let Some(path) = path_opt {
+                if let Some(layer) = ConfigLayer::from_toml_file(path, *kind)? {
+                    loaded.push(layer);
+                }
+            }
+        }
+        Ok(loaded)
+    }
+
+    /// Apply pre-read layers from `read_layers_from_disk`, replacing file-based
+    /// layers and re-merging. This is the write-lock portion of a reload.
+    pub fn apply_reload(&mut self, file_layers: Vec<ConfigLayer>) {
+        let old_merged = std::mem::take(&mut self.merged);
+
+        // Remove all file-based layers, keep defaults + extension + cli
+        self.layers.retain(|l| matches!(l.kind, LayerKind::Default | LayerKind::Extension | LayerKind::Cli));
+        self.layers.extend(file_layers);
+        self.merge_layers();
+
         let changed = Self::diff_keys(&old_merged, &self.merged);
         self.publish_change_event(&changed);
+    }
+
+    /// Reload config files from disk (convenience for single-threaded use).
+    /// Prefer `read_layers_from_disk` + `apply_reload` when holding a write lock.
+    pub fn reload(&mut self) -> Result<(), ConfigError> {
+        let layers = self.read_layers_from_disk()?;
+        self.apply_reload(layers);
         Ok(())
     }
 
