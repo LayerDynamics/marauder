@@ -4,18 +4,21 @@
   "version": "0.1.0",
   "identifier": "com.ryanoboyle.marauder",
   "build": {
-    "beforeDevCommand": "deno task dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "deno task build",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "withGlobalTauri": true,
     "windows": [
       {
         "title": "marauder",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "decorations": false,
+        "transparent": true
       }
     ],
     "security": {

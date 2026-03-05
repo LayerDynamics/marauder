@@ -13,6 +13,7 @@ cosmic-text = { workspace = true }
 marauder-event-bus = { path = "../event-bus" }
 marauder-grid = { path = "../grid" }
 raw-window-handle = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
