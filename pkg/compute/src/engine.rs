@@ -437,13 +437,18 @@ impl ComputeEngine {
     ) -> Result<String, ComputeError> {
         let cell_buffer = self.cell_buffer.as_ref().ok_or(ComputeError::NoCellData)?;
 
+        // Compute max output size once — used for both the uniform params and buffer allocation.
+        // Each row contributes up to `cols` codepoints + 1 newline (except the last row).
+        let num_rows = end_row.saturating_sub(start_row) + 1;
+        let max_output = (num_rows * self.grid_cols + num_rows) as usize;
+
         let params = SelectionParams {
             start_row,
             start_col,
             end_row,
             end_col,
             cols: self.grid_cols,
-            max_output: (end_row.saturating_sub(start_row) + 1) * self.grid_cols + end_row.saturating_sub(start_row),
+            max_output: max_output as u32,
             _pad0: 0,
             _pad1: 0,
         };
@@ -452,10 +457,6 @@ impl ComputeEngine {
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-
-        // Max output: all cells in range + newlines
-        let num_rows = end_row.saturating_sub(start_row) + 1;
-        let max_output = (num_rows * self.grid_cols + num_rows) as usize;
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("selection_output"),
             size: (max_output * 4) as u64,

@@ -126,13 +126,24 @@ const MAX_BUF_SIZE = 64 * 1024 * 1024;
  * Sentinel value returned by Rust FFI when the output buffer is too small.
  * Rust returns `usize::MAX`; Deno FFI surfaces large usize as BigInt on 64-bit.
  */
+/**
+ * Sentinel values from Rust FFI:
+ * - `usize::MAX` (BUFFER_TOO_SMALL): output buffer too small, retry with larger buffer
+ * - `usize::MAX - 1` (INTERNAL_ERROR): internal error (UTF-8, GPU, JSON, null handle)
+ * - `0`: success with no results (empty result set)
+ */
 function isBufferTooSmall(written: number | bigint): boolean {
-  // Handle both number and BigInt representations
   if (typeof written === "bigint") {
     return written === 0xFFFFFFFFFFFFFFFFn;
   }
-  // On 32-bit (unlikely), usize::MAX = 0xFFFFFFFF
   return written === 0xFFFFFFFF;
+}
+
+function isInternalError(written: number | bigint): boolean {
+  if (typeof written === "bigint") {
+    return written === 0xFFFFFFFFFFFFFFFEn;
+  }
+  return written === 0xFFFFFFFE;
 }
 
 /**
@@ -148,6 +159,12 @@ export class ComputeEngine {
   /** Create a compute engine sharing the renderer's device and queue. */
   constructor(devicePtr: Deno.PointerValue, queuePtr: Deno.PointerValue);
   constructor(devicePtr?: Deno.PointerValue, queuePtr?: Deno.PointerValue) {
+    // Validate: either both pointers or neither — partial args are a caller bug
+    if ((devicePtr && !queuePtr) || (!devicePtr && queuePtr)) {
+      throw new Error(
+        "ComputeEngine: must provide both devicePtr and queuePtr, or neither"
+      );
+    }
     if (devicePtr && queuePtr) {
       this.#handle = lib.symbols.compute_create_shared(devicePtr, queuePtr);
     } else {
@@ -200,6 +217,9 @@ export class ComputeEngine {
         this.#growBuf();
         continue;
       }
+      if (isInternalError(written)) {
+        throw new Error("ComputeEngine.search: internal error (check logs)");
+      }
       if (written === 0) return [];
       return JSON.parse(decoder.decode(outBuf.subarray(0, written as number)));
     }
@@ -220,6 +240,9 @@ export class ComputeEngine {
       if (isBufferTooSmall(written)) {
         this.#growBuf();
         continue;
+      }
+      if (isInternalError(written)) {
+        throw new Error("ComputeEngine.detectUrls: internal error (check logs)");
       }
       if (written === 0) return [];
       const raw: Array<{ row: number; start_col: number; end_col: number }> =
@@ -246,6 +269,9 @@ export class ComputeEngine {
         this.#growBuf();
         continue;
       }
+      if (isInternalError(written)) {
+        throw new Error("ComputeEngine.highlightCells: internal error (check logs)");
+      }
       if (written === 0) return [];
       return JSON.parse(decoder.decode(outBuf.subarray(0, written as number)));
     }
@@ -268,6 +294,9 @@ export class ComputeEngine {
       if (isBufferTooSmall(written)) {
         this.#growBuf();
         continue;
+      }
+      if (isInternalError(written)) {
+        throw new Error("ComputeEngine.extractSelection: internal error (check logs)");
       }
       if (written === 0) return "";
       return decoder.decode(outBuf.subarray(0, written as number));

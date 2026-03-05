@@ -124,13 +124,13 @@ pub unsafe extern "C" fn compute_search(
     out_buf_len: usize,
 ) -> usize {
     if handle.is_null() || pattern_ptr.is_null() || out_buf.is_null() {
-        return 0;
+        return INTERNAL_ERROR;
     }
     let handle = unsafe { &*handle };
     let pattern_bytes = unsafe { std::slice::from_raw_parts(pattern_ptr, pattern_len) };
     let pattern = match std::str::from_utf8(pattern_bytes) {
         Ok(s) => s,
-        Err(_) => return 0,
+        Err(_) => return INTERNAL_ERROR,
     };
 
     let engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn compute_search(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "compute_search failed");
-            return 0;
+            return INTERNAL_ERROR;
         }
     };
 
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn compute_detect_urls(
     out_buf_len: usize,
 ) -> usize {
     if handle.is_null() || out_buf.is_null() {
-        return 0;
+        return INTERNAL_ERROR;
     }
     let handle = unsafe { &*handle };
     let engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn compute_detect_urls(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "compute_detect_urls failed");
-            return 0;
+            return INTERNAL_ERROR;
         }
     };
     write_json_to_buf(&results, out_buf, out_buf_len)
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn compute_highlight_cells(
     out_buf_len: usize,
 ) -> usize {
     if handle.is_null() || out_buf.is_null() {
-        return 0;
+        return INTERNAL_ERROR;
     }
     let handle = unsafe { &*handle };
     let engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn compute_highlight_cells(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "compute_highlight_cells failed");
-            return 0;
+            return INTERNAL_ERROR;
         }
     };
     write_json_to_buf(&results, out_buf, out_buf_len)
@@ -215,7 +215,7 @@ pub unsafe extern "C" fn compute_extract_selection(
     out_buf_len: usize,
 ) -> usize {
     if handle.is_null() || out_buf.is_null() {
-        return 0;
+        return INTERNAL_ERROR;
     }
     let handle = unsafe { &*handle };
     let engine = handle.engine.lock().unwrap_or_else(|e| e.into_inner());
@@ -223,7 +223,7 @@ pub unsafe extern "C" fn compute_extract_selection(
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(error = %e, "compute_extract_selection failed");
-            return 0;
+            return INTERNAL_ERROR;
         }
     };
 
@@ -258,6 +258,10 @@ pub unsafe extern "C" fn compute_destroy(handle: *mut ComputeHandle) {
 /// The TypeScript FFI layer must check for this and retry with a larger buffer.
 const BUFFER_TOO_SMALL: usize = usize::MAX;
 
+/// Sentinel return value indicating an internal error (UTF-8, GPU, etc.).
+/// Distinct from 0 (which means "no results") and BUFFER_TOO_SMALL.
+const INTERNAL_ERROR: usize = usize::MAX - 1;
+
 /// Helper: serialize to JSON and write to output buffer.
 /// Returns bytes written on success, 0 on serialization error,
 /// or `BUFFER_TOO_SMALL` (`usize::MAX`) if the buffer is too small.
@@ -268,7 +272,7 @@ unsafe fn write_json_to_buf<T: serde::Serialize>(
 ) -> usize {
     let json = match serde_json::to_vec(value) {
         Ok(j) => j,
-        Err(_) => return 0,
+        Err(_) => return INTERNAL_ERROR,
     };
     if json.len() > out_buf_len {
         tracing::warn!(

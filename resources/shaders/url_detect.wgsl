@@ -219,10 +219,10 @@ fn try_scheme_url(base: u32, col: u32, cols: u32) -> u32 {
 
 // Check for bare email: local@domain.tld
 // Scans backward for local part, forward for domain.
-// Returns (start_col, end_col) packed as start_col << 16 | end_col, or 0 if no match.
-fn try_email(base: u32, at_col: u32, cols: u32) -> u32 {
+// Emits the result directly via emit_result and returns true, or returns false.
+fn try_email(row: u32, base: u32, at_col: u32, cols: u32) -> bool {
     // Need chars before and after @
-    if (at_col == 0u || at_col + 1u >= cols) { return 0u; }
+    if (at_col == 0u || at_col + 1u >= cols) { return false; }
 
     // Scan backward for local part (alnum, '.', '_', '-', '+')
     var local_start = at_col;
@@ -234,7 +234,7 @@ fn try_email(base: u32, at_col: u32, cols: u32) -> u32 {
             break;
         }
     }
-    if (local_start == at_col) { return 0u; } // no local part
+    if (local_start == at_col) { return false; } // no local part
 
     // Scan forward for domain (alnum, '.', '-')
     var domain_end = at_col + 1u;
@@ -252,12 +252,13 @@ fn try_email(base: u32, at_col: u32, cols: u32) -> u32 {
     }
 
     // Must have at least one dot in domain
-    if (!has_dot) { return 0u; }
+    if (!has_dot) { return false; }
     // Domain must not end with dot or hyphen
     let last_domain = cp_at(base, domain_end - 1u);
-    if (last_domain == 46u || last_domain == 45u) { return 0u; }
+    if (last_domain == 46u || last_domain == 45u) { return false; }
 
-    return (local_start << 16u) | domain_end;
+    emit_result(row, local_start, domain_end);
+    return true;
 }
 
 @compute @workgroup_size(256)
@@ -297,12 +298,14 @@ fn detect_urls(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Check for bare email at '@' sign
         if (cp == 64u) { // @
-            let email = try_email(base, col, params.cols);
-            if (email != 0u) {
-                let email_start = email >> 16u;
-                let email_end = email & 0xFFFFu;
-                emit_result(row, email_start, email_end);
-                col = email_end;
+            if (try_email(row, base, col, params.cols)) {
+                // try_email emitted the result; skip past the domain.
+                // We need to re-scan forward to find domain_end for skip.
+                var skip = col + 1u;
+                while (skip < params.cols && !is_url_terminator(cp_at(base, skip))) {
+                    skip += 1u;
+                }
+                col = skip;
                 continue;
             }
         }
