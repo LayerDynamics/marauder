@@ -1,12 +1,13 @@
 mod event_bridge;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 use marauder_event_bus::bus;
 use marauder_event_bus::events::{Event, EventType};
 use marauder_grid::Grid;
-use marauder_pty::TauriPtyManager;
+use marauder_pty::{PaneId, TauriPtyManager};
 use marauder_renderer::{Renderer, RendererConfig};
 use marauder_runtime::{MarauderRuntime, RuntimeConfig};
 
@@ -15,6 +16,12 @@ type SharedGrid = Arc<Mutex<Grid>>;
 
 /// Shared renderer handle, accessible from Tauri commands.
 type SharedRenderer = Arc<Mutex<Option<Renderer>>>;
+
+/// Map of pane_id → grid, shared so focus changes can swap the active grid.
+type PaneGridMap = Arc<Mutex<HashMap<PaneId, SharedGrid>>>;
+
+/// Currently focused pane's grid, swapped on PaneFocused events.
+type ActiveGrid = Arc<Mutex<Option<SharedGrid>>>;
 
 /// Tauri command: get the renderer's cell size (width, height) in pixels.
 #[tauri::command]
@@ -51,12 +58,27 @@ pub fn run() {
     let event_bus = bus::create_shared();
     let webview_subs = event_bridge::WebviewSubscriptions::new(event_bus.clone());
 
-    let active_grid: Arc<Mutex<Option<SharedGrid>>> = Arc::new(Mutex::new(None));
+    let active_grid: ActiveGrid = Arc::new(Mutex::new(None));
+    let pane_grids: PaneGridMap = Arc::new(Mutex::new(HashMap::new()));
     let shared_renderer: SharedRenderer = Arc::new(Mutex::new(None));
 
     let active_grid_for_setup = active_grid.clone();
+    let pane_grids_for_setup = pane_grids.clone();
     let event_bus_for_setup = event_bus.clone();
     let renderer_for_setup = shared_renderer.clone();
+
+    // Listen for PaneFocused events to swap the active grid
+    let active_grid_for_focus = active_grid.clone();
+    let pane_grids_for_focus = pane_grids.clone();
+    event_bus.subscribe(EventType::PaneFocused, move |event: &Event| {
+        if let Ok(pane_id) = event.payload_as::<PaneId>() {
+            let grids = pane_grids_for_focus.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(grid) = grids.get(&pane_id) {
+                *active_grid_for_focus.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(grid));
+                tracing::debug!(pane_id, "Switched active grid for rendering");
+            }
+        }
+    });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -69,6 +91,7 @@ pub fn run() {
                 .expect("main window not found");
 
             let active_grid_for_thread = active_grid_for_setup.clone();
+            let pane_grids_for_thread = pane_grids_for_setup.clone();
             let event_bus_for_thread = event_bus_for_setup.clone();
             let renderer_for_thread = renderer_for_setup.clone();
             let window_arc = Arc::new(window.clone());
@@ -98,6 +121,9 @@ pub fn run() {
                             tracing::info!(pane_id, "Initial pane created");
                             if let Some(pipeline) = runtime.pipeline(pane_id) {
                                 let grid = Arc::clone(&pipeline.grid);
+                                // Register in pane grid map and set as active
+                                pane_grids_for_thread.lock().unwrap_or_else(|e| e.into_inner())
+                                    .insert(pane_id, Arc::clone(&grid));
                                 *active_grid_for_thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(grid);
                             }
                         }
@@ -105,6 +131,17 @@ pub fn run() {
                             tracing::error!(error = %e, "Failed to create initial pane");
                         }
                     }
+
+                    // Listen for new panes to register their grids
+                    let pane_grids_for_new = pane_grids_for_thread.clone();
+                    event_bus_for_thread.subscribe(EventType::PaneCreated, move |event: &Event| {
+                        if let Ok(pane_id) = event.payload_as::<PaneId>() {
+                            let grid = Arc::new(Mutex::new(Grid::new(24, 80)));
+                            pane_grids_for_new.lock().unwrap_or_else(|e| e.into_inner())
+                                .insert(pane_id, grid);
+                            tracing::debug!(pane_id, "Registered grid for new pane");
+                        }
+                    });
 
                     // Init wgpu renderer
                     let renderer_config = RendererConfig::default();
@@ -159,8 +196,6 @@ pub fn run() {
                                 match renderer.render_frame(grid) {
                                     Ok(()) => {}
                                     Err(wgpu::SurfaceError::Lost) => {
-                                        // Surface lost — reconfigure will happen via
-                                        // renderer_resize command from the frontend
                                         tracing::debug!("Surface lost, waiting for resize");
                                     }
                                     Err(wgpu::SurfaceError::OutOfMemory) => {
