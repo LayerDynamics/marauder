@@ -990,7 +990,7 @@ mod tests {
         // Hide cursor, move it, change attrs
         grid.apply_action(&TerminalAction::ResetMode(TerminalMode::DecPrivate(25)));
         assert!(!grid.cursor.visible);
-        grid.apply_action(&TerminalAction::CursorTo(5, 10));
+        grid.apply_action(&TerminalAction::CursorPosition { row: 5, col: 10 });
 
         // FullReset should restore visibility
         grid.apply_action(&TerminalAction::FullReset);

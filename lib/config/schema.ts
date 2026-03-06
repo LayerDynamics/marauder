@@ -1,13 +1,15 @@
 /**
- * Configuration schema — typed interfaces for all Marauder config sections.
+ * @marauder/config — Typed configuration schema
+ *
+ * Defines the full MarauderConfig type hierarchy with validation.
  */
 
-import type { RGBA } from "../ui/styling/color-scheme.ts";
+// defaults.ts only imports *types* from this file, so no circular dependency at runtime.
 import { DEFAULT_CONFIG } from "./defaults.ts";
 
 /** Terminal emulator settings. */
 export interface TerminalConfig {
-  /** Shell executable path. */
+  /** Shell executable path. Defaults to $SHELL or /bin/sh. */
   shell: string;
   /** Scrollback buffer size in lines. */
   scrollback: number;
@@ -33,32 +35,32 @@ export interface FontConfig {
 
 /** Cursor appearance settings. */
 export interface CursorConfig {
-  /** Cursor shape: "block", "underline", or "bar". */
+  /** Cursor style: "block", "underline", or "bar". */
   style: "block" | "underline" | "bar";
   /** Whether the cursor blinks. */
   blink: boolean;
 }
 
-/** Window appearance settings. */
+/** Window chrome settings. */
 export interface WindowConfig {
-  /** Window opacity (0.0 = fully transparent, 1.0 = fully opaque). */
+  /** Window opacity (0.0 to 1.0). */
   opacity: number;
-  /** Whether to show native window decorations. */
+  /** Whether to show window decorations. */
   decorations: boolean;
 }
 
-/** Theme / color scheme settings. */
+/** Theme color configuration. */
 export interface ThemeConfig {
-  /** Terminal background color as RGBA tuple. */
-  background?: RGBA;
-  /** Default text foreground color as RGBA tuple. */
-  foreground?: RGBA;
-  /** Cursor color as RGBA tuple. */
-  cursor?: RGBA;
-  /** Selection highlight color as RGBA tuple. */
-  selection?: RGBA;
-  /** 16-color ANSI palette. Each entry is an RGBA tuple. */
-  palette?: RGBA[];
+  /** Background color as [R, G, B, A] (0-255). */
+  background?: [number, number, number, number];
+  /** Foreground color as [R, G, B, A] (0-255). */
+  foreground?: [number, number, number, number];
+  /** Cursor color as [R, G, B, A] (0-255). */
+  cursor?: [number, number, number, number];
+  /** Selection highlight color as [R, G, B, A] (0-255). */
+  selection?: [number, number, number, number];
+  /** ANSI color palette (16 colors). */
+  palette?: Array<[number, number, number]>;
 }
 
 /** Top-level Marauder configuration. */
@@ -67,42 +69,46 @@ export interface MarauderConfig {
   font: FontConfig;
   cursor: CursorConfig;
   window: WindowConfig;
-  theme: ThemeConfig;
+  keybindings: Record<string, string>;
+  theme?: ThemeConfig;
 }
 
 /**
- * Validate and coerce a raw config object into a MarauderConfig.
- * Missing sections are filled with defaults from DEFAULT_CONFIG.
+ * Validate and fill defaults for a raw config object.
+ * Returns a complete MarauderConfig with all required fields populated.
  */
 export function validateConfig(raw: unknown, defaults?: MarauderConfig): MarauderConfig {
   const effectiveDefaults = defaults ?? DEFAULT_CONFIG;
 
-  if (raw == null || typeof raw !== "object") {
+  if (raw === null || raw === undefined || typeof raw !== "object") {
     return { ...effectiveDefaults };
   }
 
   const obj = raw as Record<string, unknown>;
 
   const config: MarauderConfig = {
-    terminal: mergeSection(obj.terminal, effectiveDefaults.terminal) as TerminalConfig,
-    font: mergeSection(obj.font, effectiveDefaults.font) as FontConfig,
-    cursor: mergeSection(obj.cursor, effectiveDefaults.cursor) as CursorConfig,
-    window: mergeSection(obj.window, effectiveDefaults.window) as WindowConfig,
-    theme: mergeSection(obj.theme, effectiveDefaults.theme) as ThemeConfig,
+    terminal: mergeSection(effectiveDefaults.terminal, obj.terminal),
+    font: mergeSection(effectiveDefaults.font, obj.font),
+    cursor: mergeSection(effectiveDefaults.cursor, obj.cursor),
+    window: mergeSection(effectiveDefaults.window, obj.window),
+    keybindings: (typeof obj.keybindings === "object" && obj.keybindings !== null)
+      ? obj.keybindings as Record<string, string>
+      : { ...effectiveDefaults.keybindings },
+    theme: obj.theme as ThemeConfig | undefined,
   };
 
   return enforceConstraints(config, effectiveDefaults);
 }
 
-/** Merge a partial section with defaults. */
+/** Merge a partial section with its defaults. */
 function mergeSection<T extends Record<string, unknown>>(
-  partial: unknown,
   defaults: T,
+  partial: unknown,
 ): T {
-  if (partial == null || typeof partial !== "object") {
+  if (partial === null || partial === undefined || typeof partial !== "object") {
     return { ...defaults };
   }
-  return { ...defaults, ...(partial as Partial<T>) };
+  return { ...defaults, ...partial as Partial<T> };
 }
 
 const VALID_CURSOR_STYLES = new Set(["block", "underline", "bar"]);
@@ -139,20 +145,25 @@ function enforceConstraints(config: MarauderConfig, defaults: MarauderConfig): M
   if (typeof w.decorations !== "boolean") w.decorations = wd.decorations;
 
   const th = config.theme;
-  if (th.background != null && !isRGBA(th.background)) th.background = undefined;
-  if (th.foreground != null && !isRGBA(th.foreground)) th.foreground = undefined;
-  if (th.cursor != null && !isRGBA(th.cursor)) th.cursor = undefined;
-  if (th.selection != null && !isRGBA(th.selection)) th.selection = undefined;
-  if (th.palette != null && !isValidPalette(th.palette)) th.palette = undefined;
+  if (th) {
+    if (th.background != null && !isRGBA(th.background)) th.background = undefined;
+    if (th.foreground != null && !isRGBA(th.foreground)) th.foreground = undefined;
+    if (th.cursor != null && !isRGBA(th.cursor)) th.cursor = undefined;
+    if (th.selection != null && !isRGBA(th.selection)) th.selection = undefined;
+    if (th.palette != null && !isValidPalette(th.palette)) th.palette = undefined;
+  }
 
   return config;
 }
 
-function isRGBA(v: unknown): v is RGBA {
+function isRGBA(v: unknown): v is [number, number, number, number] {
   return Array.isArray(v) && v.length === 4 && v.every((n) => typeof n === "number" && n >= 0 && n <= 255);
 }
 
-function isValidPalette(v: unknown): v is RGBA[] {
-  return Array.isArray(v) && v.length === 16 && v.every((entry) => isRGBA(entry));
+function isValidPalette(v: unknown): v is Array<[number, number, number]> {
+  return Array.isArray(v) && v.length === 16 &&
+    v.every((entry) => Array.isArray(entry) && entry.length === 3 && entry.every((n: unknown) => typeof n === "number" && n >= 0 && n <= 255));
 }
 
+// Re-export DEFAULT_CONFIG so consumers can import from either module.
+export { DEFAULT_CONFIG } from "./defaults.ts";

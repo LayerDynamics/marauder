@@ -14,7 +14,8 @@
     "@marauder/shell": "./lib/shell/mod.ts",
     "@marauder/ui": "./lib/ui/mod.ts",
     "@marauder/io": "./lib/io/mod.ts",
-    "@marauder/dev": "./lib/dev/mod.ts"
+    "@marauder/dev": "./lib/dev/mod.ts",
+    "@marauder/config": "./lib/config/mod.ts"
   },
   "tasks": {
     "dev": "deno run --allow-all --unstable-ffi lib/io/pipeline.ts",

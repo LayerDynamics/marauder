@@ -1,21 +1,11 @@
 /**
- * TypedConfig — high-level config access wrapping the FFI ConfigStore.
+ * @marauder/config — Typed configuration accessor
  *
- * Provides typed section getters with caching, change callbacks,
- * and automatic invalidation on ConfigChanged events.
+ * Wraps the FFI ConfigStore with a typed interface, caching parsed sections
+ * and supporting change subscriptions.
  */
 
-export type {
-  MarauderConfig,
-  TerminalConfig,
-  FontConfig,
-  CursorConfig,
-  WindowConfig,
-  ThemeConfig,
-} from "./schema.ts";
-export { validateConfig } from "./schema.ts";
-export { DEFAULT_CONFIG } from "./defaults.ts";
-
+import type { ConfigStore } from "@marauder/ffi-config-store";
 import type {
   MarauderConfig,
   TerminalConfig,
@@ -24,172 +14,202 @@ import type {
   WindowConfig,
   ThemeConfig,
 } from "./schema.ts";
+import { validateConfig } from "./schema.ts";
 import { DEFAULT_CONFIG } from "./defaults.ts";
-import { ConfigStore, type ConfigPaths } from "../../ffi/config-store/mod.ts";
 
-/** Callback invoked when a config section changes. */
-export type ConfigChangeCallback<T> = (newValue: T) => void;
+export type { MarauderConfig, TerminalConfig, FontConfig, CursorConfig, WindowConfig, ThemeConfig };
+export { DEFAULT_CONFIG } from "./defaults.ts";
+export { validateConfig } from "./schema.ts";
 
-/** Section name → type mapping. */
-type SectionMap = {
-  terminal: TerminalConfig;
-  font: FontConfig;
-  cursor: CursorConfig;
-  window: WindowConfig;
-  theme: ThemeConfig;
-};
+/** Config section names for change subscriptions. */
+export type ConfigSection = "terminal" | "font" | "cursor" | "window" | "keybindings" | "theme";
 
-type SectionName = keyof SectionMap;
+type ChangeCallback<T> = (value: T) => void;
 
 /**
- * Typed configuration manager wrapping the native ConfigStore via FFI.
- *
- * Usage:
- * ```ts
- * using config = new TypedConfig();
- * config.load({ user: "~/.config/marauder/config.toml" });
- * const font = config.font();
- * config.onChange("font", (f) => console.log("font changed:", f));
- * ```
+ * Typed configuration accessor wrapping the raw ConfigStore.
+ * Caches parsed sections and invalidates on config changes.
  */
 export class TypedConfig {
-  #store: ConfigStore;
-  #cache: Partial<Record<SectionName, unknown>> = {};
-  #listeners: Partial<Record<SectionName, ConfigChangeCallback<unknown>[]>> = {};
+  readonly #store: ConfigStore;
+  #cache: Partial<MarauderConfig> = {};
+  readonly #listeners = new Map<ConfigSection, Set<ChangeCallback<unknown>>>();
+  /** Additional layers from TypeScript config files. */
+  #tsOverrides: Partial<MarauderConfig> = {};
 
-  constructor() {
-    this.#store = new ConfigStore();
+  constructor(store: ConfigStore) {
+    this.#store = store;
   }
 
-  /** Load config from file paths (delegates to native ConfigStore). */
-  load(paths: ConfigPaths): void {
-    this.#store.load(paths);
+  /** Get terminal configuration. */
+  get terminal(): TerminalConfig {
+    if (!this.#cache.terminal) {
+      this.#cache.terminal = this.#readSection("terminal", DEFAULT_CONFIG.terminal);
+    }
+    return this.#cache.terminal;
+  }
+
+  /** Get font configuration. */
+  get font(): FontConfig {
+    if (!this.#cache.font) {
+      this.#cache.font = this.#readSection("font", DEFAULT_CONFIG.font);
+    }
+    return this.#cache.font;
+  }
+
+  /** Get cursor configuration. */
+  get cursor(): CursorConfig {
+    if (!this.#cache.cursor) {
+      this.#cache.cursor = this.#readSection("cursor", DEFAULT_CONFIG.cursor);
+    }
+    return this.#cache.cursor;
+  }
+
+  /** Get window configuration. */
+  get window(): WindowConfig {
+    if (!this.#cache.window) {
+      this.#cache.window = this.#readSection("window", DEFAULT_CONFIG.window);
+    }
+    return this.#cache.window;
+  }
+
+  /** Get keybindings. */
+  get keybindings(): Record<string, string> {
+    if (!this.#cache.keybindings) {
+      const fromStore = this.#store.get<Record<string, string>>("keybindings");
+      const fromTs = this.#tsOverrides.keybindings;
+      this.#cache.keybindings = {
+        ...DEFAULT_CONFIG.keybindings,
+        ...(fromStore ?? {}),
+        ...(fromTs ?? {}),
+      };
+    }
+    return this.#cache.keybindings;
+  }
+
+  /** Get theme configuration (optional). */
+  get theme(): ThemeConfig | undefined {
+    if (!this.#cache.theme) {
+      const fromStore = this.#store.get<ThemeConfig>("theme");
+      const fromTs = this.#tsOverrides.theme;
+      this.#cache.theme = fromTs ?? fromStore ?? undefined;
+    }
+    return this.#cache.theme;
+  }
+
+  /** Get the full resolved config. */
+  getAll(): MarauderConfig {
+    return {
+      terminal: this.terminal,
+      font: this.font,
+      cursor: this.cursor,
+      window: this.window,
+      keybindings: this.keybindings,
+      theme: this.theme,
+    };
+  }
+
+  /**
+   * Subscribe to changes for a specific config section.
+   * Returns an unsubscribe function for easy cleanup.
+   */
+  onChange<T>(section: ConfigSection, callback: ChangeCallback<T>): () => void {
+    let set = this.#listeners.get(section);
+    if (!set) {
+      set = new Set();
+      this.#listeners.set(section, set);
+    }
+    const wrapped = callback as ChangeCallback<unknown>;
+    set.add(wrapped);
+
+    return () => {
+      const s = this.#listeners.get(section);
+      if (s) s.delete(wrapped);
+    };
+  }
+
+  /** Remove a change listener by reference. */
+  offChange<T>(section: ConfigSection, callback: ChangeCallback<T>): void {
+    const set = this.#listeners.get(section);
+    if (set) {
+      set.delete(callback as ChangeCallback<unknown>);
+    }
+  }
+
+  /** Apply TypeScript config overrides (from config.ts files). */
+  applyTsOverrides(overrides: Partial<MarauderConfig>): void {
+    this.#tsOverrides = overrides;
     this.invalidateAll();
   }
 
-  /** Get the terminal configuration section. */
-  terminal(): TerminalConfig {
-    return this.#getSection("terminal");
-  }
-
-  /** Get the font configuration section. */
-  font(): FontConfig {
-    return this.#getSection("font");
-  }
-
-  /** Get the cursor configuration section. */
-  cursor(): CursorConfig {
-    return this.#getSection("cursor");
-  }
-
-  /** Get the window configuration section. */
-  window(): WindowConfig {
-    return this.#getSection("window");
-  }
-
-  /** Get the theme configuration section. */
-  theme(): ThemeConfig {
-    return this.#getSection("theme");
-  }
-
-  /** Get the full resolved configuration. */
-  all(): MarauderConfig {
-    return {
-      terminal: this.terminal(),
-      font: this.font(),
-      cursor: this.cursor(),
-      window: this.window(),
-      theme: this.theme(),
-    };
-  }
-
-  /** Register a callback for when a section changes. Returns an unsubscribe function. */
-  onChange<S extends SectionName>(
-    section: S,
-    callback: ConfigChangeCallback<SectionMap[S]>,
-  ): () => void {
-    const list = this.#listeners[section] ??= [];
-    const wrapped = callback as ConfigChangeCallback<unknown>;
-    list.push(wrapped);
-    return () => {
-      const arr = this.#listeners[section];
-      if (arr) {
-        const idx = arr.indexOf(wrapped);
-        if (idx !== -1) arr.splice(idx, 1);
-      }
-    };
-  }
-
-  /** Invalidate cached values for a specific section and notify listeners. */
-  invalidate(section: SectionName): void {
-    delete this.#cache[section];
-    const newValue = this.#getSection(section);
-    const listeners = this.#listeners[section];
-    if (listeners) {
-      for (const cb of listeners) {
-        cb(newValue);
-      }
-    }
-  }
-
-  /** Invalidate all cached sections. Called on reload. */
+  /**
+   * Invalidate all cached sections and notify all listeners.
+   *
+   * Always notifies rather than attempting to diff old vs new values,
+   * since equality checks (JSON.stringify, deep-equal) are expensive,
+   * brittle with non-JSON values, and order-sensitive. Listeners are
+   * expected to be cheap or to do their own diff if needed.
+   */
   invalidateAll(): void {
-    const sections: SectionName[] = ["terminal", "font", "cursor", "window", "theme"];
-    for (const s of sections) {
-      this.invalidate(s);
+    this.#cache = {};
+
+    for (const section of this.#listeners.keys()) {
+      const newVal = this[section as keyof Pick<TypedConfig, ConfigSection>];
+      this.#notifyListeners(section, newVal);
     }
   }
 
-  /** Set a config value and invalidate the relevant section cache. */
-  set(key: string, value: unknown): void {
-    this.#store.set(key, value);
-    // Invalidate the section this key belongs to
-    const sectionKey = key.split(".")[0];
-    if (sectionKey && this.#isValidSection(sectionKey)) {
-      this.invalidate(sectionKey);
-    }
+  /** Invalidate a specific section. */
+  invalidate(section: ConfigSection): void {
+    delete this.#cache[section as keyof MarauderConfig];
+    const newVal = this[section as keyof Pick<TypedConfig, ConfigSection>];
+    this.#notifyListeners(section, newVal);
   }
 
-  /** Save config to a file path. */
-  save(path: string): void {
-    this.#store.save(path);
+  /** Access the underlying raw ConfigStore. */
+  get store(): ConfigStore {
+    return this.#store;
   }
 
-  /** Start watching config files for changes. */
-  watch(): void {
-    this.#store.watch();
-  }
+  #readSection<T extends Record<string, unknown>>(
+    section: string,
+    defaults: T,
+  ): T {
+    const result = { ...defaults };
+    const tsOverride = this.#tsOverrides[section as keyof MarauderConfig];
 
-  /** Stop watching config files. */
-  unwatch(): void {
-    this.#store.unwatch();
-  }
-
-  /** Destroy the underlying native handle. */
-  destroy(): void {
-    this.#store.destroy();
-  }
-
-  [Symbol.dispose](): void {
-    this.destroy();
-  }
-
-  static readonly #VALID_SECTIONS: ReadonlySet<string> = new Set<SectionName>([
-    "terminal", "font", "cursor", "window", "theme",
-  ]);
-
-  #isValidSection(key: string): key is SectionName {
-    return TypedConfig.#VALID_SECTIONS.has(key);
-  }
-
-  #getSection<S extends SectionName>(section: S): SectionMap[S] {
-    if (section in this.#cache) {
-      return this.#cache[section] as SectionMap[S];
+    // Single FFI call to fetch the entire section object
+    const sectionVal = this.#store.get<Record<string, unknown>>(section);
+    if (sectionVal && typeof sectionVal === "object") {
+      for (const key of Object.keys(defaults)) {
+        if (key in sectionVal && sectionVal[key] !== undefined) {
+          (result as Record<string, unknown>)[key] = sectionVal[key];
+        }
+      }
     }
 
-    // Try to read from native store, fall back to defaults
-    const value = this.#store.get<SectionMap[S]>(section) ?? DEFAULT_CONFIG[section];
-    this.#cache[section] = value;
-    return value as SectionMap[S];
+    // Apply TS overrides on top
+    if (tsOverride && typeof tsOverride === "object") {
+      for (const [key, val] of Object.entries(tsOverride)) {
+        if (key in defaults) {
+          (result as Record<string, unknown>)[key] = val;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  #notifyListeners(section: ConfigSection, value: unknown): void {
+    const set = this.#listeners.get(section);
+    if (set) {
+      for (const cb of set) {
+        try {
+          cb(value);
+        } catch {
+          // Don't let listener errors propagate
+        }
+      }
+    }
   }
 }
