@@ -42,4 +42,3 @@ export const DEFAULT_CONFIG: MarauderConfig = {
   window: DEFAULT_WINDOW,
   keybindings: {},
 };
-

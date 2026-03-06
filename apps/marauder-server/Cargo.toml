@@ -1,0 +1,21 @@
+[package]
+name = "marauder-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+marauder-runtime = { path = "../../pkg/runtime" }
+marauder-ipc = { path = "../../pkg/ipc" }
+marauder-daemon = { path = "../../pkg/daemon" }
+marauder-event-bus = { path = "../../pkg/event-bus" }
+marauder-pty = { path = "../../pkg/pty" }
+marauder-parser = { path = "../../pkg/parser" }
+marauder-grid = { path = "../../pkg/grid" }
+marauder-config-store = { path = "../../pkg/config-store" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }

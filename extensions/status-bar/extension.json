@@ -1,0 +1,6 @@
+{
+  "name": "status-bar",
+  "version": "0.1.0",
+  "description": "Status bar segments showing cwd, branch, and pane info",
+  "entry": "mod.ts"
+}

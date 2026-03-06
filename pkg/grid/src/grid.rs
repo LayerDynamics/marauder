@@ -14,6 +14,8 @@ pub struct SavedCursor {
     pub attrs: CellAttributes,
     pub fg: Color,
     pub bg: Color,
+    /// DECTCEM visibility state at time of save.
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,8 @@ pub struct Cursor {
     pub fg: Color,
     pub bg: Color,
     pub saved: Option<SavedCursor>,
+    /// DECTCEM cursor visibility (DEC Private Mode 25). True by default.
+    pub visible: bool,
 }
 
 impl Default for Cursor {
@@ -35,6 +39,7 @@ impl Default for Cursor {
             fg: Color::Default,
             bg: Color::Default,
             saved: None,
+            visible: true,
         }
     }
 }
@@ -282,6 +287,7 @@ impl Grid {
                     attrs: self.cursor.attrs,
                     fg: self.cursor.fg,
                     bg: self.cursor.bg,
+                    visible: self.cursor.visible,
                 });
             }
             TerminalAction::RestoreCursor => {
@@ -291,6 +297,7 @@ impl Grid {
                     self.cursor.attrs = saved.attrs;
                     self.cursor.fg = saved.fg;
                     self.cursor.bg = saved.bg;
+                    self.cursor.visible = saved.visible;
                 }
             }
             TerminalAction::EraseInDisplay(mode) => self.action_erase_display(*mode),
@@ -667,6 +674,10 @@ impl Grid {
 
     fn apply_set_mode(&mut self, mode: &TerminalMode) {
         match mode {
+            TerminalMode::DecPrivate(25) => {
+                // DECTCEM: show cursor
+                self.cursor.visible = true;
+            }
             TerminalMode::DecPrivate(1049) => {
                 // Switch to alternate screen buffer
                 self.using_alternate = true;
@@ -682,6 +693,10 @@ impl Grid {
 
     fn apply_reset_mode(&mut self, mode: &TerminalMode) {
         match mode {
+            TerminalMode::DecPrivate(25) => {
+                // DECTCEM: hide cursor
+                self.cursor.visible = false;
+            }
             TerminalMode::DecPrivate(1049) => {
                 // Switch back to primary screen buffer
                 self.using_alternate = false;
@@ -924,6 +939,20 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_visibility_dectcem() {
+        let mut grid = Grid::new(24, 80);
+        assert!(grid.cursor.visible, "cursor should be visible by default");
+
+        // DECTCEM: hide cursor (reset mode 25)
+        grid.apply_action(&TerminalAction::ResetMode(TerminalMode::DecPrivate(25)));
+        assert!(!grid.cursor.visible, "cursor should be hidden after reset mode 25");
+
+        // DECTCEM: show cursor (set mode 25)
+        grid.apply_action(&TerminalAction::SetMode(TerminalMode::DecPrivate(25)));
+        assert!(grid.cursor.visible, "cursor should be visible after set mode 25");
+    }
+
+    #[test]
     fn test_erase_line_to_end_splits_wide_char() {
         let mut grid = Grid::new(24, 80);
         // Print wide '中' at col 0-1
@@ -952,5 +981,37 @@ mod tests {
         // Col 1 should now be 'B'
         assert_eq!(screen.rows[0][1].c, 'B');
         assert_eq!(screen.rows[0][1].width, 1);
+    }
+
+    #[test]
+    fn test_full_reset_restores_cursor_visibility() {
+        let mut grid = Grid::new(24, 80);
+
+        // Hide cursor, move it, change attrs
+        grid.apply_action(&TerminalAction::ResetMode(TerminalMode::DecPrivate(25)));
+        assert!(!grid.cursor.visible);
+        grid.apply_action(&TerminalAction::CursorPosition { row: 5, col: 10 });
+
+        // FullReset should restore visibility
+        grid.apply_action(&TerminalAction::FullReset);
+        assert!(grid.cursor.visible, "FullReset must restore cursor visibility");
+        assert_eq!(grid.cursor.row, 0);
+        assert_eq!(grid.cursor.col, 0);
+    }
+
+    #[test]
+    fn test_save_restore_cursor_preserves_visibility() {
+        let mut grid = Grid::new(24, 80);
+
+        // Save with cursor visible
+        grid.apply_action(&TerminalAction::SaveCursor);
+
+        // Hide cursor
+        grid.apply_action(&TerminalAction::ResetMode(TerminalMode::DecPrivate(25)));
+        assert!(!grid.cursor.visible);
+
+        // Restore should bring back visibility
+        grid.apply_action(&TerminalAction::RestoreCursor);
+        assert!(grid.cursor.visible, "RestoreCursor must restore saved visibility state");
     }
 }
