@@ -49,6 +49,19 @@ function pixelToCell(x: number, y: number): { row: number; col: number } {
   };
 }
 
+/** Wheel handler for scrollback — stored for teardown removal. */
+function handleWheel(e: WheelEvent): void {
+  if (activePaneId === null) return;
+  e.preventDefault();
+  const lines = Math.round(e.deltaY / (cellHeight || 16.8));
+  if (lines !== 0) {
+    // Positive deltaY = scroll down in browser = scroll up into history (positive offset)
+    gridClient.scrollViewportBy(activePaneId, lines).catch((err) => {
+      console.error("Scroll failed:", err);
+    });
+  }
+}
+
 let urlDetectTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Schedule debounced URL detection (300ms after last grid update). */
@@ -438,6 +451,7 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
 
   // Capture paneId synchronously before any async calls to avoid races
   const paneId = activePaneId;
+  if (paneId === null) return;
 
   // Built-in keybindings checked synchronously before async backend call
   // Clipboard: Ctrl+Shift+C (copy), Ctrl+Shift+V (paste)
@@ -541,6 +555,16 @@ function teardown(): void {
   document.removeEventListener("keydown", handleKeyInput);
   document.removeEventListener("mouseup", handleMouseUp);
   window.removeEventListener("resize", handleResize);
+
+  // Remove grid-specific mouse listeners
+  const gridEl = document.getElementById("terminal-grid");
+  if (gridEl) {
+    gridEl.removeEventListener("wheel", handleWheel);
+    gridEl.removeEventListener("mousedown", handleMouseDown);
+    gridEl.removeEventListener("mousemove", handleMouseMove);
+    gridEl.removeEventListener("dblclick", handleDblClick);
+  }
+
   eventBus.destroy().catch(() => {});
 }
 
@@ -590,17 +614,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Wire mouse wheel for scrollback navigation
   const gridEl = document.getElementById("terminal-grid");
   if (gridEl) {
-    gridEl.addEventListener("wheel", (e: WheelEvent) => {
-      if (activePaneId === null) return;
-      e.preventDefault();
-      const lines = Math.round(e.deltaY / (cellHeight || 16.8));
-      if (lines !== 0) {
-        // Positive deltaY = scroll down in browser = scroll up into history (positive offset)
-        gridClient.scrollViewportBy(activePaneId, lines).catch((err) => {
-          console.error("Scroll failed:", err);
-        });
-      }
-    }, { passive: false });
+    gridEl.addEventListener("wheel", handleWheel, { passive: false });
   }
 
   // Wire mouse selection handlers
