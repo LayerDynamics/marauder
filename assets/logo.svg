@@ -1,0 +1,59 @@
+<!-- marauder-flag.svg -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512"
+     height="320"
+     viewBox="0 0 512 320"
+     role="img"
+     aria-label="Black flag on pole with white >_ symbol">
+
+  <!-- Pole (clean rounded top) -->
+  <rect
+    x="40"
+    y="72"
+    width="20"
+    height="212"
+    rx="10"
+    ry="10"
+    fill="#000000"
+    stroke="#ffffff"
+    stroke-width="4"/>
+
+  <!-- Flag -->
+  <path
+    d="
+      M60 80
+      C110 70, 140 90, 180 82
+      C210 76, 240 88, 280 80
+      L320 80
+      L320 240
+      L280 240
+      C240 232, 210 244, 180 238
+      C140 230, 110 250, 60 240
+      Z"
+    fill="#000000"
+    stroke="#ffffff"
+    stroke-width="4"
+    stroke-linejoin="round"/>
+
+  <!-- Attachment rings -->
+  <circle cx="60" cy="96" r="5" fill="#ffffff"/>
+  <circle cx="60" cy="224" r="5" fill="#ffffff"/>
+
+  <!-- >_ symbol -->
+  <g fill="#ffffff">
+    <!-- > -->
+    <path
+      d="
+        M170 130
+        L210 160
+        L170 190
+        L170 170
+        L195 160
+        L170 150
+        Z"/>
+    
+    <!-- _ -->
+    <rect x="220" y="185" width="55" height="12"/>
+  </g>
+
+</svg>

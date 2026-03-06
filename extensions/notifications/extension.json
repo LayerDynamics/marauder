@@ -1,0 +1,6 @@
+{
+  "name": "notifications",
+  "version": "0.1.0",
+  "description": "Desktop notifications for long-running commands",
+  "entry": "mod.ts"
+}

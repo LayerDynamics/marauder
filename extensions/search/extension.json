@@ -1,0 +1,6 @@
+{
+  "name": "search",
+  "version": "0.1.0",
+  "description": "GPU-accelerated in-terminal search",
+  "entry": "mod.ts"
+}

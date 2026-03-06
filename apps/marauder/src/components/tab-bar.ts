@@ -76,6 +76,10 @@ export class TabBar {
     this.render();
   }
 
+  getActiveTabId(): number | null {
+    return this.activeTabId;
+  }
+
   renameTab(id: number, title: string): void {
     const tab = this.tabs.get(id);
     if (tab) {

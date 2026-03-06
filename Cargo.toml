@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "apps/marauder/src-tauri",
+  "apps/marauder-server",
   "pkg/event-bus",
   "pkg/pty",
   "pkg/parser",
