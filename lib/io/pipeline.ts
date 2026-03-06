@@ -183,6 +183,7 @@ export class TerminalPipeline {
             dirtyRows,
             cursor: this.grid.getCursor(),
           });
+          this.grid.clearDirty();
         }
       } catch (err) {
         this.#log.error("Error in read loop iteration", err);
