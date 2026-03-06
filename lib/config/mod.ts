@@ -142,18 +142,20 @@ export class TypedConfig {
     this.invalidateAll();
   }
 
-  /** Invalidate all cached sections and notify listeners. */
+  /**
+   * Invalidate all cached sections and notify all listeners.
+   *
+   * Always notifies rather than attempting to diff old vs new values,
+   * since equality checks (JSON.stringify, deep-equal) are expensive,
+   * brittle with non-JSON values, and order-sensitive. Listeners are
+   * expected to be cheap or to do their own diff if needed.
+   */
   invalidateAll(): void {
-    const oldConfig = this.#cache;
     this.#cache = {};
 
-    // Notify listeners for sections that changed
     for (const section of this.#listeners.keys()) {
-      const oldVal = oldConfig[section as keyof MarauderConfig];
       const newVal = this[section as keyof Pick<TypedConfig, ConfigSection>];
-      if (JSON.stringify(oldVal) !== JSON.stringify(newVal)) {
-        this.#notifyListeners(section, newVal);
-      }
+      this.#notifyListeners(section, newVal);
     }
   }
 

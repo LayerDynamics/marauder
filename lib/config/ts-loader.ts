@@ -8,6 +8,19 @@
 import type { MarauderConfig } from "./schema.ts";
 import { validateConfig } from "./schema.ts";
 
+/**
+ * Convert an absolute filesystem path to a file:// URL string.
+ * Handles both Unix and Windows paths.
+ */
+function toFileUrl(path: string): string {
+  // On Windows, paths like C:\Users\... need the extra slash: file:///C:/Users/...
+  if (path.match(/^[A-Za-z]:\\/)) {
+    return `file:///${path.replace(/\\/g, "/")}`;
+  }
+  // Unix absolute path: /home/user/... → file:///home/user/...
+  return `file://${path}`;
+}
+
 /** Well-known config file paths, checked in order. */
 const CONFIG_DIRS = [
   () => `${Deno.env.get("HOME") ?? "~"}/.config/marauder`,
@@ -25,8 +38,11 @@ const CONFIG_FILENAMES = ["config.ts", "config.toml"];
  */
 export async function loadTsConfig(path: string): Promise<Partial<MarauderConfig>> {
   try {
-    // Dynamic import of the TS config file
-    const mod = await import(path);
+    // Deno requires file:// URLs for absolute path imports.
+    // Convert filesystem paths to proper URL specifiers, handling both
+    // Unix (/home/user/...) and Windows (C:\Users\...) paths.
+    const specifier = path.startsWith("file://") ? path : toFileUrl(path);
+    const mod = await import(specifier);
     const raw = mod.default ?? mod;
 
     if (typeof raw !== "object" || raw === null) {
@@ -103,8 +119,9 @@ export function watchTsConfig(
         if (closed) break;
         if (event.kind === "modify" || event.kind === "create") {
           try {
-            // Add cache-busting query param so Deno re-imports
-            const config = await loadTsConfig(`${path}#${Date.now()}`);
+            // Cache-bust via query param on the file:// URL so Deno re-imports
+            const url = `${toFileUrl(path)}?v=${Date.now()}`;
+            const config = await loadTsConfig(url);
             callback(config);
           } catch {
             // Ignore errors from in-progress saves

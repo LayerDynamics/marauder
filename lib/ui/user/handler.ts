@@ -130,12 +130,28 @@ export class ActionDispatcher {
         return true;
       }
 
+      // UI chrome actions — dispatch via event bus for the webview to handle.
+      // These are first-class keybinding actions (not extension passthrough).
+      case "command-palette":
+      case "search":
+      case "font-size-increase":
+      case "font-size-decrease":
+      case "font-size-reset":
+        this.#eventBus.publish(EventType.ExtensionMessage, {
+          type: "ui-action",
+          action,
+          paneId: context.paneId.toString(),
+        });
+        return true;
+
       default:
-        // Publish unhandled action as an event for extensions
+        // Publish unhandled action as an event for extensions.
+        // paneId is emitted as a string to avoid bigint→number precision loss
+        // for IDs that might exceed Number.MAX_SAFE_INTEGER.
         this.#eventBus.publish(EventType.ExtensionMessage, {
           type: "action",
           action,
-          paneId: Number(context.paneId),
+          paneId: context.paneId.toString(),
         });
         return false;
     }

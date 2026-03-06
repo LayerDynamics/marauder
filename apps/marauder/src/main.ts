@@ -171,24 +171,28 @@ function buildKeySequence(e: KeyboardEvent): string {
  * Encode a KeyboardEvent into VT/ANSI bytes for PTY consumption.
  * Returns null for unrecognized keys.
  *
- * NOTE: This must stay in sync with lib/io/vt.ts (the Deno-side encoder).
- * The webview cannot import Deno modules directly, so this is a mirror copy.
- * If you add key encodings here, add them in vt.ts too (and vice versa).
+ * Key mappings are sourced from lib/io/vt-keymap.ts (single source of truth
+ * shared with the Deno-side encoder lib/io/vt.ts). Vite resolves the import
+ * at build time — no Deno-specific APIs are used in the keymap module.
  */
-function encodeKeyForPty(e: KeyboardEvent): Uint8Array | null {
-  const enc = new TextEncoder();
+import {
+  CSI_TILDE_KEYS,
+  CSI_LETTER_KEYS,
+  SS3_FUNCTION_KEYS,
+  CTRL_SPECIAL,
+  computeXtermModifier,
+} from "../../../lib/io/vt-keymap";
 
+const enc = new TextEncoder();
+
+function encodeKeyForPty(e: KeyboardEvent): Uint8Array | null {
   // Ctrl+letter → control character (0x01-0x1A)
   if (e.ctrlKey && e.key.length === 1) {
     const code = e.key.toLowerCase().charCodeAt(0);
     if (code >= 0x61 && code <= 0x7a) return new Uint8Array([code - 0x60]);
-    // Ctrl+special
-    if (e.key === "[") return new Uint8Array([0x1b]); // Escape
-    if (e.key === "\\") return new Uint8Array([0x1c]); // SIGQUIT
-    if (e.key === "]") return new Uint8Array([0x1d]);
-    if (e.key === "^") return new Uint8Array([0x1e]);
-    if (e.key === "_") return new Uint8Array([0x1f]);
-    if (e.key === " ") return new Uint8Array([0x00]); // Ctrl+Space = NUL
+    // Ctrl+special characters (from shared keymap)
+    const ctrlByte = CTRL_SPECIAL[e.key];
+    if (ctrlByte !== undefined) return new Uint8Array([ctrlByte]);
     return null;
   }
 
@@ -206,80 +210,40 @@ function encodeKeyForPty(e: KeyboardEvent): Uint8Array | null {
     return enc.encode(e.key);
   }
 
-  // xterm-style modifier parameter:
-  // 1=none, 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Shift+Ctrl, 7=Alt+Ctrl, 8=Shift+Alt+Ctrl
-  let mod = 1;
-  if (e.shiftKey) mod += 1;
-  if (e.altKey) mod += 2;
-  if (e.ctrlKey) mod += 4;
+  // xterm-style modifier parameter (from shared keymap)
+  const mod = computeXtermModifier(e.shiftKey, e.altKey, e.ctrlKey);
 
-  /** Encode CSI tilde-sequence with optional modifier. */
-  const csi = (seq: string): Uint8Array => {
-    if (mod > 1 && seq.endsWith("~")) {
-      const base = seq.slice(0, -1);
-      return enc.encode(`\x1b[${base};${mod}~`);
-    }
-    return enc.encode(`\x1b[${seq}`);
-  };
-
-  /** Encode arrow/Home/End (SS3 unmodified, CSI modified). */
-  const ss3 = (letter: string): Uint8Array => {
-    if (mod > 1) return enc.encode(`\x1b[1;${mod}${letter}`);
-    return enc.encode(`\x1b[${letter}`);
-  };
-
+  // Simple special keys
   switch (e.key) {
     case "Enter": return enc.encode("\r");
     case "Backspace": return e.altKey ? new Uint8Array([0x1b, 0x7f]) : new Uint8Array([0x7f]);
     case "Tab": return e.shiftKey ? enc.encode("\x1b[Z") : enc.encode("\t");
     case "Escape": return new Uint8Array([0x1b]);
-    case "Delete": return csi("3~");
-    case "Insert": return csi("2~");
-    case "PageUp": return csi("5~");
-    case "PageDown": return csi("6~");
-
-    // Arrow keys
-    case "ArrowUp": return ss3("A");
-    case "ArrowDown": return ss3("B");
-    case "ArrowRight": return ss3("C");
-    case "ArrowLeft": return ss3("D");
-
-    // Home/End
-    case "Home": return ss3("H");
-    case "End": return ss3("F");
-
-    // Function keys F1-F4 (SS3 prefix unmodified)
-    case "F1": return enc.encode(mod > 1 ? `\x1b[1;${mod}P` : "\x1bOP");
-    case "F2": return enc.encode(mod > 1 ? `\x1b[1;${mod}Q` : "\x1bOQ");
-    case "F3": return enc.encode(mod > 1 ? `\x1b[1;${mod}R` : "\x1bOR");
-    case "F4": return enc.encode(mod > 1 ? `\x1b[1;${mod}S` : "\x1bOS");
-
-    // Function keys F5-F12
-    case "F5": return csi("15~");
-    case "F6": return csi("17~");
-    case "F7": return csi("18~");
-    case "F8": return csi("19~");
-    case "F9": return csi("20~");
-    case "F10": return csi("21~");
-    case "F11": return csi("23~");
-    case "F12": return csi("24~");
-
-    // Function keys F13-F24
-    case "F13": return csi("25~");
-    case "F14": return csi("26~");
-    case "F15": return csi("28~");
-    case "F16": return csi("29~");
-    case "F17": return csi("31~");
-    case "F18": return csi("32~");
-    case "F19": return csi("33~");
-    case "F20": return csi("34~");
-    case "F21": return csi("42~");
-    case "F22": return csi("43~");
-    case "F23": return csi("44~");
-    case "F24": return csi("45~");
-
-    default: return null;
+    default: break;
   }
+
+  // CSI tilde-sequences (Delete, Insert, PageUp/Down, F5-F24)
+  const tildeCode = CSI_TILDE_KEYS[e.key];
+  if (tildeCode !== undefined) {
+    if (mod > 1) return enc.encode(`\x1b[${tildeCode};${mod}~`);
+    return enc.encode(`\x1b[${tildeCode}~`);
+  }
+
+  // Arrow/Home/End — CSI letter encoding
+  const letter = CSI_LETTER_KEYS[e.key];
+  if (letter !== undefined) {
+    if (mod > 1) return enc.encode(`\x1b[1;${mod}${letter}`);
+    return enc.encode(`\x1b[${letter}`);
+  }
+
+  // F1-F4 — SS3 unmodified, CSI modified
+  const ss3Letter = SS3_FUNCTION_KEYS[e.key];
+  if (ss3Letter !== undefined) {
+    if (mod > 1) return enc.encode(`\x1b[1;${mod}${ss3Letter}`);
+    return enc.encode(`\x1bO${ss3Letter}`);
+  }
+
+  return null;
 }
 
 /**
