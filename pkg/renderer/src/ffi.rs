@@ -229,8 +229,8 @@ pub unsafe extern "C" fn renderer_update_cells(
     let gh = &*grid_handle;
     let mut r = lock_or_err!(h, mutable);
     gh.with_grid(|grid| {
-        let (bg, text, crow, ccol, cvis) = r.build_instances_from(grid);
-        r.upload_instances(&bg, &text, crow, ccol, cvis);
+        let (bg, text, sel, crow, ccol, cvis) = r.build_instances_from(grid);
+        r.upload_instances(&bg, &text, &sel, crow, ccol, cvis);
     });
     // Re-upload atlas if build_instances_from rasterized new glyphs
     r.flush_atlas_if_dirty();

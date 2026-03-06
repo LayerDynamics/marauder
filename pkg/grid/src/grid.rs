@@ -65,6 +65,7 @@ pub struct Grid {
     /// Current selection, if any.
     selection: Option<Selection>,
     /// Viewport scroll offset (0 = at bottom / live, >0 = scrolled up into history).
+    /// Use `viewport_offset()`, `scroll_viewport()`, or `scroll_viewport_by()` to access/modify.
     viewport_offset: usize,
 }
 
@@ -139,6 +140,9 @@ impl Grid {
         self.alternate.resize(new_rows, new_cols);
         self.dirty_rows.resize(new_rows, true);
         self.mark_all_dirty();
+        // Reset scroll region to full screen on resize.
+        // If scroll_top >= new_rows the invariant scroll_top < scroll_bottom would break.
+        self.scroll_top = 0;
         self.scroll_bottom = new_rows;
         // Clamp cursor
         if self.cursor.row >= new_rows {
@@ -177,11 +181,10 @@ impl Grid {
     }
 
     /// Extract selected text as a string.
-    // TODO: When viewport_offset > 0, selection coordinates may refer to
-    // scrollback rows. Currently only the active screen is searched.
+    /// Uses `visible_row()` to correctly resolve selection coordinates
+    /// when the viewport is scrolled into scrollback history.
     pub fn get_selection_text(&self) -> Option<String> {
         let sel = self.selection.as_ref()?;
-        let screen = self.active_screen();
         let mut text = String::new();
 
         let (sr, sc, er, ec) = if (sel.start_row, sel.start_col) <= (sel.end_row, sel.end_col) {
@@ -191,8 +194,10 @@ impl Grid {
         };
 
         for row in sr..=er {
-            if row >= screen.rows.len() { break; }
-            let row_data = &screen.rows[row];
+            let row_data = match self.visible_row(row) {
+                Some(data) => data,
+                None => break,
+            };
             let col_start = if row == sr { sc } else { 0 };
             let col_end = if row == er { ec.min(row_data.len()) } else { row_data.len() };
             for col in col_start..col_end {
@@ -204,6 +209,49 @@ impl Grid {
         }
         // Trim trailing spaces per line
         Some(text.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n"))
+    }
+
+    /// Read-only access to the viewport scroll offset.
+    pub fn viewport_offset(&self) -> usize {
+        self.viewport_offset
+    }
+
+    /// Return the row of cells that should be displayed at a given visible row index,
+    /// accounting for `viewport_offset` into the scrollback buffer.
+    ///
+    /// When `viewport_offset == 0` (live view), this returns `screen.rows[row]`.
+    /// When scrolled up, the top rows come from scrollback and the bottom rows
+    /// from the active screen.
+    pub fn visible_row(&self, row: usize) -> Option<&[Cell]> {
+        let screen = self.active_screen();
+        let total_rows = screen.rows.len();
+        if row >= total_rows {
+            return None;
+        }
+        let offset = self.viewport_offset;
+        if offset == 0 {
+            return Some(&screen.rows[row]);
+        }
+        // The scrollback is ordered oldest-first. With viewport_offset N,
+        // we want to show the last N scrollback rows at the top of the viewport.
+        let scrollback_len = screen.scrollback_len();
+        // scrollback_start: the index into scrollback of the first visible row
+        // scrollback rows shown = min(offset, scrollback_len)
+        let visible_scrollback = offset.min(scrollback_len);
+        let scrollback_start = scrollback_len - visible_scrollback;
+
+        if row < visible_scrollback {
+            // This row comes from scrollback
+            screen.scrollback_row(scrollback_start + row).map(|r| r.as_slice())
+        } else {
+            // This row comes from the active screen
+            let screen_row = row - visible_scrollback;
+            if screen_row < total_rows {
+                Some(&screen.rows[screen_row])
+            } else {
+                None
+            }
+        }
     }
 
     /// Set viewport to an absolute scrollback offset (0 = bottom).

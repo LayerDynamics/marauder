@@ -57,6 +57,10 @@ pub fn open_pty(config: &PtyConfig) -> anyhow::Result<OpenPtyResult> {
 }
 
 /// Resize a PTY master.
+///
+/// `portable_pty::MasterPty::resize()` sets the terminal window size via
+/// `ioctl(TIOCSWINSZ)`. The kernel then sends SIGWINCH to the foreground
+/// process group automatically — no explicit signal dispatch is required.
 pub fn resize_master(master: &dyn MasterPty, rows: u16, cols: u16) -> anyhow::Result<()> {
     anyhow::ensure!(rows > 0, "rows must be > 0");
     anyhow::ensure!(cols > 0, "cols must be > 0");

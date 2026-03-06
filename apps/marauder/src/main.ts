@@ -3,7 +3,9 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
-import { EventBusClient, PtyClient } from "./ipc";
+import { writeText, readText } from "@tauri-apps/plugin-clipboard-manager";
+import { EventBusClient, PtyClient, GridClient } from "./ipc";
+import { detectUrlsInRow, findUrlAtCell, openUrl, type UrlMatch } from "../../../lib/ui/url-handler";
 import { TabBar } from "./components/tab-bar";
 import { StatusBar } from "./components/status-bar";
 import {
@@ -18,6 +20,7 @@ import {
 
 const eventBus = new EventBusClient();
 const ptyClient = new PtyClient();
+const gridClient = new GridClient();
 
 let tabBar: TabBar;
 let statusBar: StatusBar;
@@ -27,6 +30,176 @@ let tabCounter = 0;
 /** Cached cell size from the renderer. Updated on init and font changes. */
 let cellWidth = 0;
 let cellHeight = 0;
+
+/** Mouse selection tracking state. */
+let isSelecting = false;
+let selectionAnchorRow = 0;
+let selectionAnchorCol = 0;
+
+/** Cached URL matches for the visible grid area. */
+let cachedUrlMatches: UrlMatch[] = [];
+
+/** Convert pixel coordinates relative to grid element to cell coordinates. */
+function pixelToCell(x: number, y: number): { row: number; col: number } {
+  const cw = cellWidth || 8.4;
+  const ch = cellHeight || 16.8;
+  return {
+    col: Math.floor(x / cw),
+    row: Math.floor(y / ch),
+  };
+}
+
+/** Wheel handler for scrollback — stored for teardown removal. */
+function handleWheel(e: WheelEvent): void {
+  if (activePaneId === null) return;
+  e.preventDefault();
+  const lines = Math.round(e.deltaY / (cellHeight || 16.8));
+  if (lines !== 0) {
+    // Positive deltaY = scroll down in browser = scroll up into history (positive offset)
+    gridClient.scrollViewportBy(activePaneId, lines).catch((err) => {
+      console.error("Scroll failed:", err);
+    });
+  }
+}
+
+let urlDetectTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Schedule debounced URL detection (300ms after last grid update). */
+function scheduleUrlDetection(): void {
+  if (urlDetectTimer !== null) clearTimeout(urlDetectTimer);
+  urlDetectTimer = setTimeout(() => {
+    urlDetectTimer = null;
+    detectVisibleUrls();
+  }, 300);
+}
+
+/** Detect URLs in visible grid rows. Triggered by GridUpdated events. */
+async function detectVisibleUrls(): Promise<void> {
+  if (activePaneId === null) return;
+  try {
+    const snapshot = await gridClient.getScreenSnapshot(activePaneId);
+    const matches: UrlMatch[] = [];
+    for (let row = 0; row < snapshot.cells.length; row++) {
+      const rowText = snapshot.cells[row].map((c: { c: string }) => c.c).join("");
+      matches.push(...detectUrlsInRow(row, rowText));
+    }
+    cachedUrlMatches = matches;
+  } catch {
+    // Grid snapshot not available
+  }
+}
+
+/** Handle mousedown on terminal grid — start selection. */
+function handleMouseDown(e: MouseEvent): void {
+  if (activePaneId === null || e.button !== 0) return;
+
+  // Ctrl+Click (or Cmd+Click on macOS) opens URLs
+  if (e.ctrlKey || e.metaKey) {
+    const gridEl = e.currentTarget as HTMLElement;
+    const rect = gridEl.getBoundingClientRect();
+    const { row, col } = pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
+    const url = findUrlAtCell(cachedUrlMatches, row, col);
+    if (url) {
+      e.preventDefault();
+      openUrl(url).catch(console.error);
+      return;
+    }
+  }
+
+  const gridEl = e.currentTarget as HTMLElement;
+  const rect = gridEl.getBoundingClientRect();
+  const { row, col } = pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
+
+  isSelecting = true;
+  selectionAnchorRow = row;
+  selectionAnchorCol = col;
+
+  // Clear previous selection
+  gridClient.clearSelection(activePaneId).catch(console.error);
+
+  e.preventDefault();
+}
+
+/** Handle mousemove on terminal grid — update selection while dragging. */
+function handleMouseMove(e: MouseEvent): void {
+  // When NOT selecting, update cursor for URL hover
+  if (!isSelecting) {
+    const gridEl = document.getElementById("terminal-grid");
+    if (gridEl) {
+      const rect = gridEl.getBoundingClientRect();
+      const { row, col } = pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
+      const url = findUrlAtCell(cachedUrlMatches, row, col);
+      gridEl.style.cursor = (url && (e.ctrlKey || e.metaKey)) ? "pointer" : "";
+    }
+  }
+
+  if (!isSelecting || activePaneId === null) return;
+
+  const gridEl = document.getElementById("terminal-grid");
+  if (!gridEl) return;
+  const rect = gridEl.getBoundingClientRect();
+  const { row, col } = pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
+
+  // Normalize: ensure start <= end
+  const startRow = Math.min(selectionAnchorRow, row);
+  const startCol = (selectionAnchorRow < row || (selectionAnchorRow === row && selectionAnchorCol <= col))
+    ? selectionAnchorCol : col;
+  const endRow = Math.max(selectionAnchorRow, row);
+  const endCol = (selectionAnchorRow < row || (selectionAnchorRow === row && selectionAnchorCol <= col))
+    ? col : selectionAnchorCol;
+
+  gridClient.setSelection(activePaneId, startRow, startCol, endRow, endCol).catch(console.error);
+}
+
+/** Handle mouseup — finalize selection. */
+function handleMouseUp(_e: MouseEvent): void {
+  isSelecting = false;
+}
+
+/** Characters considered part of a "word" for double-click selection. */
+const WORD_CHAR_RE = /[A-Za-z0-9_\-./~]/;
+
+/** Handle double-click — select word at cursor position. */
+async function handleDblClick(e: MouseEvent): Promise<void> {
+  if (activePaneId === null) return;
+
+  const gridEl = e.currentTarget as HTMLElement;
+  const rect = gridEl.getBoundingClientRect();
+  const { row, col } = pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
+  const paneId = activePaneId;
+
+  try {
+    // Get the full row via screen snapshot to scan word boundaries
+    const snapshot = await gridClient.getScreenSnapshot(paneId);
+    if (row >= snapshot.cells.length) return;
+    const rowCells = snapshot.cells[row];
+    const rowLen = rowCells.length;
+
+    // Check if the clicked cell is a word character
+    if (col >= rowLen || !WORD_CHAR_RE.test(rowCells[col].c)) {
+      // Not a word char — select the single cell
+      gridClient.setSelection(paneId, row, col, row, col).catch(console.error);
+      return;
+    }
+
+    // Scan backward for word start
+    let startCol = col;
+    while (startCol > 0 && WORD_CHAR_RE.test(rowCells[startCol - 1].c)) {
+      startCol--;
+    }
+
+    // Scan forward for word end
+    let endCol = col;
+    while (endCol < rowLen - 1 && WORD_CHAR_RE.test(rowCells[endCol + 1].c)) {
+      endCol++;
+    }
+
+    gridClient.setSelection(paneId, row, startCol, row, endCol).catch(console.error);
+  } catch {
+    // Snapshot unavailable — fall back to single-cell selection
+    gridClient.setSelection(paneId, row, col, row, col).catch(console.error);
+  }
+}
 
 /** Decode a BusEvent payload (byte array) to a parsed object. */
 function decodePayload<T>(event: BusEvent): T | null {
@@ -130,6 +303,11 @@ function handleEvent(event: BusEvent): void {
       if (p) {
         statusBar.setDimensions(p.rows, p.cols);
       }
+      break;
+    }
+    case EventType.GridUpdated: {
+      // Debounce URL detection — grid updates can be very frequent
+      scheduleUrlDetection();
       break;
     }
     case EventType.RendererReady: {
@@ -268,14 +446,44 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
   // Let Meta (Cmd on macOS) shortcuts pass through to the system
   if (e.metaKey) return;
 
-  // Phase 1: Check for keybinding action
-  const keySeq = buildKeySequence(e);
-
   // Prevent default early so the browser doesn't act on the key while we await
-  // (we'll let it through if the key isn't bound and can't be encoded)
   e.preventDefault();
 
-  // Try to resolve via backend keybinding handler
+  // Capture paneId synchronously before any async calls to avoid races
+  const paneId = activePaneId;
+  if (paneId === null) return;
+
+  // Built-in keybindings checked synchronously before async backend call
+  // Clipboard: Ctrl+Shift+C (copy), Ctrl+Shift+V (paste)
+  if (e.ctrlKey && e.shiftKey && e.key === "C") {
+    gridClient.getSelectionText(paneId).then((text) => {
+      if (text) writeText(text).catch(console.error);
+    }).catch(console.error);
+    return;
+  }
+  if (e.ctrlKey && e.shiftKey && e.key === "V") {
+    readText().then((text) => {
+      if (text && paneId !== null) {
+        const bytes = Array.from(new TextEncoder().encode(text));
+        ptyClient.write(paneId, bytes).catch(console.error);
+      }
+    }).catch(console.error);
+    return;
+  }
+
+  // Scrollback navigation: Shift+PageUp/PageDown
+  if (e.shiftKey && e.key === "PageUp") {
+    gridClient.scrollViewportBy(paneId, 24).catch(console.error);
+    return;
+  }
+  if (e.shiftKey && e.key === "PageDown") {
+    gridClient.scrollViewportBy(paneId, -24).catch(console.error);
+    return;
+  }
+
+  // Phase 1: Check for keybinding action via backend
+  const keySeq = buildKeySequence(e);
+
   try {
     const result = await invoke("resolve_keybinding", { keySeq });
     const res = result as { action: string | null } | null;
@@ -292,21 +500,29 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
   if (encoded === null) return;
 
   const bytes = Array.from(encoded);
-  ptyClient.write(activePaneId, bytes).catch((err) => {
+  ptyClient.write(paneId, bytes).catch((err) => {
     console.error("Failed to write to PTY:", err);
   });
 
   // Publish KeyInput event for extensions via event bus bridge
   invoke("event_bus_emit", {
     event_type: EventType.KeyInput,
-    payload: JSON.stringify({ paneId: activePaneId, keySeq }),
+    payload: JSON.stringify({ paneId: paneId, keySeq }),
   }).catch((err) => {
     console.warn("Failed to emit KeyInput event:", err);
   });
 }
 
-/** Handle window resize — resize the active PTY using renderer cell metrics. */
+let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Handle window resize — debounced to avoid excessive IPC during window drag. */
 function handleResize(): void {
+  if (resizeTimer !== null) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(handleResizeImpl, 50);
+}
+
+function handleResizeImpl(): void {
+  resizeTimer = null;
   if (activePaneId === null) return;
 
   const grid = document.getElementById("terminal-grid");
@@ -337,7 +553,18 @@ function handleResize(): void {
 /** Clean up subscriptions and listeners on window unload. */
 function teardown(): void {
   document.removeEventListener("keydown", handleKeyInput);
+  document.removeEventListener("mouseup", handleMouseUp);
   window.removeEventListener("resize", handleResize);
+
+  // Remove grid-specific mouse listeners
+  const gridEl = document.getElementById("terminal-grid");
+  if (gridEl) {
+    gridEl.removeEventListener("wheel", handleWheel);
+    gridEl.removeEventListener("mousedown", handleMouseDown);
+    gridEl.removeEventListener("mousemove", handleMouseMove);
+    gridEl.removeEventListener("dblclick", handleDblClick);
+  }
+
   eventBus.destroy().catch(() => {});
 }
 
@@ -369,6 +596,7 @@ window.addEventListener("DOMContentLoaded", async () => {
       EventType.ShellCommandStarted,
       EventType.ShellCommandFinished,
       EventType.GridResized,
+      EventType.GridUpdated,
       EventType.RendererReady,
     ],
     handleEvent
@@ -383,6 +611,20 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Wire keyboard input
   document.addEventListener("keydown", handleKeyInput);
 
+  // Wire mouse wheel for scrollback navigation
+  const gridEl = document.getElementById("terminal-grid");
+  if (gridEl) {
+    gridEl.addEventListener("wheel", handleWheel, { passive: false });
+  }
+
+  // Wire mouse selection handlers
+  if (gridEl) {
+    gridEl.addEventListener("mousedown", handleMouseDown);
+    gridEl.addEventListener("mousemove", handleMouseMove);
+    gridEl.addEventListener("dblclick", handleDblClick);
+  }
+  document.addEventListener("mouseup", handleMouseUp);
+
   // Wire window resize
   window.addEventListener("resize", handleResize);
 
@@ -391,6 +633,9 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   // Create initial tab
   await createTab();
+
+  // Initial URL detection (subsequent runs triggered by GridUpdated events)
+  detectVisibleUrls();
 
   // Initial resize
   handleResize();

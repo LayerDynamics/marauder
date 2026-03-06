@@ -118,6 +118,11 @@ impl PtyManager {
     }
 
     /// Resize a PTY session.
+    ///
+    /// Delegates to `portable_pty::MasterPty::resize()`, which internally issues
+    /// an `ioctl(TIOCSWINSZ)` call. The kernel automatically delivers SIGWINCH to
+    /// the child process group when the window size changes, so no manual signal
+    /// forwarding is needed.
     pub fn resize(&mut self, id: PaneId, rows: u16, cols: u16) -> anyhow::Result<()> {
         let session = self.sessions.get_mut(&id)
             .ok_or_else(|| anyhow::anyhow!("No PTY session with id {id}"))?;
