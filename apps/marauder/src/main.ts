@@ -131,6 +131,12 @@ function handleEvent(event: BusEvent): void {
       }
       break;
     }
+    case EventType.RendererReady: {
+      document.body.classList.add("wgpu-ready");
+      // Re-fetch cell size now that renderer is fully initialized
+      fetchCellSize().catch((e) => console.error("Failed to fetch cell size on RendererReady:", e));
+      break;
+    }
   }
 }
 
@@ -258,6 +264,7 @@ window.addEventListener("DOMContentLoaded", async () => {
       EventType.ShellCommandStarted,
       EventType.ShellCommandFinished,
       EventType.GridResized,
+      EventType.RendererReady,
     ],
     handleEvent
   );

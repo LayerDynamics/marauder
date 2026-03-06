@@ -63,6 +63,9 @@ pub struct Renderer {
     start_time: Instant,
     max_cells: usize,
 
+    /// Whether the cursor is visible (DECTCEM mode 25).
+    cursor_visible: bool,
+
     /// Registered overlay layers, keyed by layer ID.
     overlays: HashMap<u32, OverlayConfig>,
 }
@@ -179,14 +182,14 @@ impl Renderer {
     /// Update instance buffers from the grid state, then render a frame.
     pub fn render_frame(&mut self, grid: &Arc<Mutex<Grid>>) -> Result<(), wgpu::SurfaceError> {
         // Lock grid, build instance data, release lock before GPU work
-        let (bg_instances, text_instances, cursor_row, cursor_col) = {
+        let (bg_instances, text_instances, cursor_row, cursor_col, cursor_visible) = {
             let mut grid = lock_or_log(&grid, "renderer::render_frame");
             let result = self.build_instances(&grid);
             grid.clear_dirty();
             result
         };
 
-        self.upload_instances(&bg_instances, &text_instances, cursor_row, cursor_col);
+        self.upload_instances(&bg_instances, &text_instances, cursor_row, cursor_col, cursor_visible);
 
         // Re-upload atlas if new glyphs were rasterized
         if self.atlas.is_dirty() {
@@ -198,12 +201,12 @@ impl Renderer {
     }
 
     /// Build background and text instance data from the grid (public for FFI).
-    pub fn build_instances_from(&mut self, grid: &Grid) -> (Vec<BgInstance>, Vec<TextInstance>, usize, usize) {
+    pub fn build_instances_from(&mut self, grid: &Grid) -> (Vec<BgInstance>, Vec<TextInstance>, usize, usize, bool) {
         self.build_instances(grid)
     }
 
     /// Build background and text instance data from the grid.
-    fn build_instances(&mut self, grid: &Grid) -> (Vec<BgInstance>, Vec<TextInstance>, usize, usize) {
+    fn build_instances(&mut self, grid: &Grid) -> (Vec<BgInstance>, Vec<TextInstance>, usize, usize, bool) {
         let rows = grid.rows();
         let cols = grid.cols();
         let (cw, ch) = self.cell_size();
@@ -253,7 +256,7 @@ impl Renderer {
             }
         }
 
-        (bg_instances, text_instances, grid.cursor.row, grid.cursor.col)
+        (bg_instances, text_instances, grid.cursor.row, grid.cursor.col, grid.cursor.visible)
     }
 
     /// Upload instance data and uniforms to GPU buffers.
@@ -263,7 +266,9 @@ impl Renderer {
         text_instances: &[TextInstance],
         cursor_row: usize,
         cursor_col: usize,
+        cursor_visible: bool,
     ) {
+        self.cursor_visible = cursor_visible;
         let total_cells = bg_instances.len();
 
         // Grow buffers if needed
@@ -315,7 +320,10 @@ impl Renderer {
         };
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-        // Upload cursor uniforms
+        // Upload cursor uniforms (skip if cursor is hidden — draw call is already gated)
+        if !self.cursor_visible {
+            return;
+        }
         let elapsed = self.start_time.elapsed().as_secs_f32();
         let (cursor_w, cursor_h) = match self.config.cursor_style {
             CursorStyle::Block => (cw, ch),
@@ -487,9 +495,11 @@ impl Renderer {
                 pass.draw(0..6, 0..self.text_instance_count);
             }
 
-            pass.set_pipeline(&rp.cursor_pipeline);
-            pass.set_bind_group(0, &rp.cursor_bind_group, &[]);
-            pass.draw(0..6, 0..1);
+            if self.cursor_visible {
+                pass.set_pipeline(&rp.cursor_pipeline);
+                pass.set_bind_group(0, &rp.cursor_bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -803,6 +813,7 @@ impl Renderer {
             text_instance_count: 0,
             start_time: Instant::now(),
             max_cells,
+            cursor_visible: true,
             overlays: HashMap::new(),
         })
     }

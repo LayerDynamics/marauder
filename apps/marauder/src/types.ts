@@ -33,6 +33,7 @@ export const EventType = {
   RenderFrameRequested: 15,
   RenderFrameCompleted: 16,
   OverlayChanged: 17,
+  RendererReady: 31,
 
   // Config layer
   ConfigChanged: 18,

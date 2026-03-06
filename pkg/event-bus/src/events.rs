@@ -77,11 +77,14 @@ pub enum EventType {
     ExtensionLoaded = 28,
     ExtensionUnloaded = 29,
     ExtensionMessage = 30,
+
+    // Renderer readiness
+    RendererReady = 31,
 }
 
 impl EventType {
     /// Maximum valid discriminant value.
-    pub const MAX_DISCRIMINANT: u32 = 30;
+    pub const MAX_DISCRIMINANT: u32 = 31;
 
     /// Try to convert a u32 discriminant to an EventType.
     pub fn from_u32(value: u32) -> Result<Self, EventError> {
@@ -117,6 +120,7 @@ impl EventType {
             28 => Ok(Self::ExtensionLoaded),
             29 => Ok(Self::ExtensionUnloaded),
             30 => Ok(Self::ExtensionMessage),
+            31 => Ok(Self::RendererReady),
             _ => Err(EventError::InvalidEventType(value)),
         }
     }
