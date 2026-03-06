@@ -77,8 +77,8 @@ export interface MarauderConfig {
  * Validate and fill defaults for a raw config object.
  * Returns a complete MarauderConfig with all required fields populated.
  */
-export function validateConfig(raw: unknown, defaults?: MarauderConfig): MarauderConfig {
-  const effectiveDefaults = defaults ?? DEFAULT_CONFIG;
+export function validateConfig(raw: unknown, defaults: MarauderConfig): MarauderConfig {
+  const effectiveDefaults = defaults;
 
   if (raw === null || raw === undefined || typeof raw !== "object") {
     return { ...effectiveDefaults };
