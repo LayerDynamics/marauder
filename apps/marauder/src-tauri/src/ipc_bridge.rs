@@ -116,6 +116,70 @@ pub async fn deno_call_op(
     await_reply(reply_rx).await
 }
 
+/// Default keybinding map — used when no config override exists.
+/// Must stay in sync with lib/ui/user/config.ts DEFAULT_KEYBINDINGS.
+fn default_keybindings() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("Ctrl+T", "new-tab"),
+        ("Ctrl+W", "close-tab"),
+        ("Ctrl+Tab", "next-tab"),
+        ("Ctrl+Shift+Tab", "prev-tab"),
+        ("Ctrl+Shift+N", "split-pane"),
+        ("Ctrl+Shift+W", "close-pane"),
+        ("Ctrl+Shift+Right", "focus-next"),
+        ("Ctrl+Shift+Left", "focus-prev"),
+        ("Ctrl+Shift+P", "command-palette"),
+        ("Ctrl+Shift+F", "search"),
+        ("Ctrl+Plus", "font-size-increase"),
+        ("Ctrl+Minus", "font-size-decrease"),
+        ("Ctrl+0", "font-size-reset"),
+    ]
+}
+
+/// Tauri command: resolve a key sequence to a UI action via config keybindings.
+///
+/// Returns `{ action: string | null }`. Null means the key should pass through to PTY.
+/// First checks the config store for user overrides (`keybindings.<key>`), then falls
+/// back to the built-in default map. Runs entirely in Rust — no Deno Eval needed.
+#[tauri::command]
+pub async fn resolve_keybinding(
+    state: tauri::State<'_, DenoBridge>,
+    key_seq: String,
+) -> Result<serde_json::Value, String> {
+    // Phase 1: Try config store via CallOp (works in all builds)
+    let config_key = format!("keybindings.{}", key_seq);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let config_result = state
+        .tx
+        .send(DenoRequest::CallOp {
+            op_name: "op_config_get".into(),
+            args: vec![serde_json::Value::String(config_key)],
+            reply: reply_tx,
+        })
+        .await;
+
+    if config_result.is_ok() {
+        if let Ok(Ok(Ok(value))) = tokio::time::timeout(Duration::from_millis(500), reply_rx).await {
+            // Config returned a value — parse it
+            let trimmed = value.trim().trim_matches('"');
+            if !trimmed.is_empty() && trimmed != "null" && trimmed != "undefined" {
+                let action: String = serde_json::from_str(&value)
+                    .unwrap_or_else(|_| trimmed.to_string());
+                return Ok(serde_json::json!({ "action": action }));
+            }
+        }
+    }
+
+    // Phase 2: Check built-in defaults (pure Rust, no Deno needed)
+    for &(key, action) in default_keybindings() {
+        if key == key_seq {
+            return Ok(serde_json::json!({ "action": action }));
+        }
+    }
+
+    Ok(serde_json::json!({ "action": null }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

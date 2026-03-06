@@ -469,6 +469,7 @@ pub fn run() {
             marauder_runtime::commands::runtime_cmd_close_pane,
             ipc_bridge::deno_eval,
             ipc_bridge::deno_call_op,
+            ipc_bridge::resolve_keybinding,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

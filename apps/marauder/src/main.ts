@@ -85,7 +85,8 @@ async function closeTab(paneId: number): Promise<void> {
   }
   tabBar.removeTab(paneId);
   if (activePaneId === paneId) {
-    activePaneId = null;
+    // Fall back to the tab that TabBar selected, or null if none remain
+    activePaneId = tabBar.getActiveTabId();
   }
 }
 
@@ -134,8 +135,125 @@ function handleEvent(event: BusEvent): void {
   }
 }
 
-/** Forward keyboard input to the active PTY, including Ctrl sequences. */
-function handleKeyInput(e: KeyboardEvent): void {
+/**
+ * Build a canonical key sequence string from a KeyboardEvent.
+ * Mirrors the logic in lib/ui/user/parser.ts for the webview context.
+ */
+function buildKeySequence(e: KeyboardEvent): string {
+  const parts: string[] = [];
+  if (e.ctrlKey) parts.push("Ctrl");
+  if (e.altKey) parts.push("Alt");
+  if (e.shiftKey) parts.push("Shift");
+  if (e.metaKey) parts.push("Meta");
+
+  let key = e.key;
+  if (key.length === 1 && key >= "a" && key <= "z") key = key.toUpperCase();
+  else if (key === "ArrowUp") key = "Up";
+  else if (key === "ArrowDown") key = "Down";
+  else if (key === "ArrowLeft") key = "Left";
+  else if (key === "ArrowRight") key = "Right";
+  else if (key === " ") key = "Space";
+
+  // Skip modifier-only keys
+  if (key === "Control" || key === "Shift" || key === "Alt" || key === "Meta") {
+    return parts.join("+");
+  }
+
+  parts.push(key);
+  return parts.join("+");
+}
+
+/**
+ * Encode a key press into VT/ANSI bytes for PTY consumption.
+ * Inline version of lib/io/vt.ts for the webview context.
+ */
+/**
+ * Encode a KeyboardEvent into VT/ANSI bytes for PTY consumption.
+ * Returns null for unrecognized keys.
+ *
+ * Key mappings are sourced from lib/io/vt-keymap.ts (single source of truth
+ * shared with the Deno-side encoder lib/io/vt.ts). Vite resolves the import
+ * at build time — no Deno-specific APIs are used in the keymap module.
+ */
+import {
+  CSI_TILDE_KEYS,
+  CSI_LETTER_KEYS,
+  SS3_FUNCTION_KEYS,
+  CTRL_SPECIAL,
+  computeXtermModifier,
+} from "../../../lib/io/vt-keymap";
+
+const enc = new TextEncoder();
+
+function encodeKeyForPty(e: KeyboardEvent): Uint8Array | null {
+  // Ctrl+letter → control character (0x01-0x1A)
+  if (e.ctrlKey && e.key.length === 1) {
+    const code = e.key.toLowerCase().charCodeAt(0);
+    if (code >= 0x61 && code <= 0x7a) return new Uint8Array([code - 0x60]);
+    // Ctrl+special characters (from shared keymap)
+    const ctrlByte = CTRL_SPECIAL[e.key];
+    if (ctrlByte !== undefined) return new Uint8Array([ctrlByte]);
+    return null;
+  }
+
+  // Alt+char → ESC + char
+  if (e.altKey && e.key.length === 1) {
+    const charBytes = enc.encode(e.key);
+    const result = new Uint8Array(1 + charBytes.length);
+    result[0] = 0x1b;
+    result.set(charBytes, 1);
+    return result;
+  }
+
+  // Printable character
+  if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+    return enc.encode(e.key);
+  }
+
+  // xterm-style modifier parameter (from shared keymap)
+  const mod = computeXtermModifier(e.shiftKey, e.altKey, e.ctrlKey);
+
+  // Simple special keys
+  switch (e.key) {
+    case "Enter": return enc.encode("\r");
+    case "Backspace": return e.altKey ? new Uint8Array([0x1b, 0x7f]) : new Uint8Array([0x7f]);
+    case "Tab": return e.shiftKey ? enc.encode("\x1b[Z") : enc.encode("\t");
+    case "Escape": return new Uint8Array([0x1b]);
+    default: break;
+  }
+
+  // CSI tilde-sequences (Delete, Insert, PageUp/Down, F5-F24)
+  const tildeCode = CSI_TILDE_KEYS[e.key];
+  if (tildeCode !== undefined) {
+    if (mod > 1) return enc.encode(`\x1b[${tildeCode};${mod}~`);
+    return enc.encode(`\x1b[${tildeCode}~`);
+  }
+
+  // Arrow/Home/End — CSI letter encoding
+  const letter = CSI_LETTER_KEYS[e.key];
+  if (letter !== undefined) {
+    if (mod > 1) return enc.encode(`\x1b[1;${mod}${letter}`);
+    return enc.encode(`\x1b[${letter}`);
+  }
+
+  // F1-F4 — SS3 unmodified, CSI modified
+  const ss3Letter = SS3_FUNCTION_KEYS[e.key];
+  if (ss3Letter !== undefined) {
+    if (mod > 1) return enc.encode(`\x1b[1;${mod}${ss3Letter}`);
+    return enc.encode(`\x1bO${ss3Letter}`);
+  }
+
+  return null;
+}
+
+/**
+ * Forward keyboard input to the active PTY with keybinding resolution.
+ *
+ * Two-phase approach:
+ * 1. Build canonical key sequence and check for UI action bindings
+ * 2. If no binding matches, encode as VT/ANSI and write to PTY
+ */
+async function handleKeyInput(e: KeyboardEvent): Promise<void> {
   if (activePaneId === null) return;
 
   // Skip modifier-only key presses
@@ -144,53 +262,40 @@ function handleKeyInput(e: KeyboardEvent): void {
   // Let Meta (Cmd on macOS) shortcuts pass through to the system
   if (e.metaKey) return;
 
-  let data: string;
+  // Phase 1: Check for keybinding action
+  const keySeq = buildKeySequence(e);
 
-  if (e.ctrlKey && e.key.length === 1) {
-    // Map Ctrl+letter to control characters (Ctrl+A=0x01, Ctrl+C=0x03, etc.)
-    const code = e.key.toLowerCase().charCodeAt(0);
-    if (code >= 0x61 && code <= 0x7a) {
-      // a-z → 0x01-0x1a
-      data = String.fromCharCode(code - 0x60);
-    } else if (e.key === "[") {
-      data = "\x1b"; // Ctrl+[ = Escape
-    } else if (e.key === "\\") {
-      data = "\x1c"; // Ctrl+\ = SIGQUIT
-    } else if (e.key === "]") {
-      data = "\x1d"; // Ctrl+]
-    } else {
-      return;
-    }
-  } else if (e.ctrlKey) {
-    // Ctrl+non-letter (arrows, etc.) — let browser handle or ignore
-    return;
-  } else if (e.key.length === 1) {
-    data = e.key;
-  } else {
-    // Map special keys to ANSI sequences
-    switch (e.key) {
-      case "Enter": data = "\r"; break;
-      case "Backspace": data = "\x7f"; break;
-      case "Tab": data = "\t"; break;
-      case "Escape": data = "\x1b"; break;
-      case "ArrowUp": data = "\x1b[A"; break;
-      case "ArrowDown": data = "\x1b[B"; break;
-      case "ArrowRight": data = "\x1b[C"; break;
-      case "ArrowLeft": data = "\x1b[D"; break;
-      case "Home": data = "\x1b[H"; break;
-      case "End": data = "\x1b[F"; break;
-      case "Delete": data = "\x1b[3~"; break;
-      case "PageUp": data = "\x1b[5~"; break;
-      case "PageDown": data = "\x1b[6~"; break;
-      default: return;
-    }
-  }
-
+  // Prevent default early so the browser doesn't act on the key while we await
+  // (we'll let it through if the key isn't bound and can't be encoded)
   e.preventDefault();
 
-  const bytes = Array.from(new TextEncoder().encode(data));
+  // Try to resolve via backend keybinding handler
+  try {
+    const result = await invoke("resolve_keybinding", { keySeq });
+    const res = result as { action: string | null } | null;
+    if (res?.action) {
+      // UI action handled by backend — don't write to PTY
+      return;
+    }
+  } catch {
+    // resolve_keybinding command not available yet — fall through to direct PTY write
+  }
+
+  // Phase 2: Encode and write to PTY (only reached when no keybinding matched)
+  const encoded = encodeKeyForPty(e);
+  if (encoded === null) return;
+
+  const bytes = Array.from(encoded);
   ptyClient.write(activePaneId, bytes).catch((err) => {
     console.error("Failed to write to PTY:", err);
+  });
+
+  // Publish KeyInput event for extensions via event bus bridge
+  invoke("event_bus_emit", {
+    event_type: EventType.KeyInput,
+    payload: JSON.stringify({ paneId: activePaneId, keySeq }),
+  }).catch((err) => {
+    console.warn("Failed to emit KeyInput event:", err);
   });
 }
 
