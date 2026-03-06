@@ -8,17 +8,38 @@
 import {
   assert,
   assertEquals,
+  assertGreater,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { TerminalPipeline } from "./pipeline.ts";
 import { EventType } from "@marauder/ffi-event-bus";
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+const TEST_ROWS = 24;
+const TEST_COLS = 80;
+
+/**
+ * Wait for a specific event to fire, with timeout.
+ * Returns the event payload, or throws if timeout elapses.
+ */
+function waitForEvent(
+  pipeline: TerminalPipeline,
+  eventType: EventType,
+  timeoutMs = 5000,
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out waiting for event ${eventType}`));
+    }, timeoutMs);
+
+    pipeline.eventBus.subscribe(eventType, (event) => {
+      clearTimeout(timer);
+      resolve(event);
+    });
+  });
 }
 
 /**
  * Poll grid cells until `target` string appears in row content,
- * or timeout elapses.
+ * or timeout elapses. Reads dimensions from the grid instance.
  */
 async function waitForGridContent(
   pipeline: TerminalPipeline,
@@ -28,10 +49,12 @@ async function waitForGridContent(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    // Scan visible rows for target text
-    for (let row = 0; row < 24; row++) {
+    const rows = pipeline.grid.rows;
+    const cols = pipeline.grid.cols;
+
+    for (let row = 0; row < rows; row++) {
       let line = "";
-      for (let col = 0; col < 80; col++) {
+      for (let col = 0; col < cols; col++) {
         const cell = pipeline.grid.getCell(row, col);
         if (cell && cell.char && cell.char !== "\0") {
           line += cell.char;
@@ -41,9 +64,29 @@ async function waitForGridContent(
         return true;
       }
     }
-    await sleep(100);
+    await new Promise((r) => setTimeout(r, 50));
   }
   return false;
+}
+
+/**
+ * Wait for the shell to be ready by polling for a GridUpdated event,
+ * which indicates the shell has produced initial output.
+ */
+function waitForShellReady(
+  pipeline: TerminalPipeline,
+  timeoutMs = 5000,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("Timed out waiting for shell to initialize"));
+    }, timeoutMs);
+
+    pipeline.eventBus.subscribe(EventType.GridUpdated, () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }
 
 Deno.test({
@@ -51,7 +94,10 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const pipeline = TerminalPipeline.create({ rows: 24, cols: 80 });
+    const pipeline = TerminalPipeline.create({
+      rows: TEST_ROWS,
+      cols: TEST_COLS,
+    });
     assertEquals(pipeline.running, false, "Should not be running before start");
 
     pipeline.start();
@@ -67,11 +113,15 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const pipeline = TerminalPipeline.create({ rows: 24, cols: 80 });
-    pipeline.start();
+    const pipeline = TerminalPipeline.create({
+      rows: TEST_ROWS,
+      cols: TEST_COLS,
+    });
 
-    // Wait for shell to initialize
-    await sleep(500);
+    // Subscribe before starting so we catch the first output
+    const shellReady = waitForShellReady(pipeline);
+    pipeline.start();
+    await shellReady;
 
     pipeline.write("echo hello\n");
 
@@ -87,9 +137,14 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const pipeline = TerminalPipeline.create({ rows: 24, cols: 80 });
+    const pipeline = TerminalPipeline.create({
+      rows: TEST_ROWS,
+      cols: TEST_COLS,
+    });
+
+    const shellReady = waitForShellReady(pipeline);
     pipeline.start();
-    await sleep(300);
+    await shellReady;
 
     let resizeEvent: { rows: number; cols: number } | null = null;
     pipeline.eventBus.subscribe(EventType.GridResized, (event) => {
@@ -103,6 +158,10 @@ Deno.test({
     assertEquals(resizeEvent!.rows, 40);
     assertEquals(resizeEvent!.cols, 120);
 
+    // Verify grid dimensions updated
+    assertEquals(pipeline.grid.rows, 40);
+    assertEquals(pipeline.grid.cols, 120);
+
     await pipeline.destroy();
   },
 });
@@ -112,7 +171,10 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const pipeline = TerminalPipeline.create({ rows: 24, cols: 80 });
+    const pipeline = TerminalPipeline.create({
+      rows: TEST_ROWS,
+      cols: TEST_COLS,
+    });
 
     let ptyOutputCount = 0;
     let gridUpdatedCount = 0;
@@ -125,13 +187,23 @@ Deno.test({
     });
 
     pipeline.start();
-    await sleep(500);
 
-    pipeline.write("echo test\n");
-    await sleep(1000);
+    // Wait for events by polling on the condition rather than a fixed sleep
+    const deadline = Date.now() + 5000;
+    while (
+      Date.now() < deadline &&
+      (ptyOutputCount === 0 || gridUpdatedCount === 0)
+    ) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
 
-    assert(ptyOutputCount > 0, "Should have received PtyOutput events");
-    assert(gridUpdatedCount > 0, "Should have received GridUpdated events");
+    // Shell startup alone should produce output
+    assertGreater(ptyOutputCount, 0, "Should have received PtyOutput events");
+    assertGreater(
+      gridUpdatedCount,
+      0,
+      "Should have received GridUpdated events",
+    );
 
     await pipeline.destroy();
   },
@@ -142,7 +214,10 @@ Deno.test({
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const pipeline = TerminalPipeline.create({ rows: 24, cols: 80 });
+    const pipeline = TerminalPipeline.create({
+      rows: TEST_ROWS,
+      cols: TEST_COLS,
+    });
 
     const dirtyRowCounts: number[] = [];
     pipeline.eventBus.subscribe(EventType.GridUpdated, (event) => {
@@ -150,28 +225,37 @@ Deno.test({
       dirtyRowCounts.push(ev.dirtyRows.length);
     });
 
+    const shellReady = waitForShellReady(pipeline);
     pipeline.start();
-    await sleep(500);
+    await shellReady;
 
-    // Send two separate commands to trigger two grid update cycles
+    // Send first command and wait for grid to reflect it
     pipeline.write("echo first\n");
-    await sleep(500);
+    await waitForGridContent(pipeline, "first");
 
+    const countAfterFirst = dirtyRowCounts.length;
+
+    // Send second command and wait for grid to reflect it
     pipeline.write("echo second\n");
-    await sleep(500);
+    await waitForGridContent(pipeline, "second");
+
+    // We must have received updates for both commands
+    assertGreater(
+      dirtyRowCounts.length,
+      countAfterFirst,
+      "Should have received GridUpdated events for 'echo second' — " +
+        `only got ${dirtyRowCounts.length} total updates (${countAfterFirst} before second command)`,
+    );
 
     // With clearDirty working, later updates should NOT accumulate
-    // all previously dirty rows. The last update should have fewer
-    // or equal dirty rows compared to the total rows ever dirtied.
-    if (dirtyRowCounts.length >= 2) {
-      const lastCount = dirtyRowCounts[dirtyRowCounts.length - 1]!;
-      // Without clearDirty, lastCount would grow toward 24 (all rows).
-      // With clearDirty, it should be a small number (just newly changed rows).
-      assert(
-        lastCount < 24,
-        `Last dirty row count (${lastCount}) should be less than total rows (24) — clearDirty should prevent accumulation`,
-      );
-    }
+    // all previously dirty rows. Check that the last update reports
+    // fewer dirty rows than the total grid height.
+    const lastCount = dirtyRowCounts[dirtyRowCounts.length - 1]!;
+    assert(
+      lastCount < TEST_ROWS,
+      `Last dirty row count (${lastCount}) should be less than total rows ` +
+        `(${TEST_ROWS}) — clearDirty should prevent accumulation`,
+    );
 
     await pipeline.destroy();
   },

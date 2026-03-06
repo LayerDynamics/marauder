@@ -87,12 +87,26 @@ export interface Cell {
 export class Grid {
   #handle: Deno.PointerValue;
   #closed = false;
+  #rows: number;
+  #cols: number;
 
   constructor(rows: number, cols: number) {
     this.#handle = lib.symbols.grid_create(rows, cols);
     if (this.#handle === null) {
       throw new Error("Failed to create Grid native handle");
     }
+    this.#rows = rows;
+    this.#cols = cols;
+  }
+
+  /** Current number of rows. */
+  get rows(): number {
+    return this.#rows;
+  }
+
+  /** Current number of columns. */
+  get cols(): number {
+    return this.#cols;
   }
 
   /**
@@ -164,6 +178,8 @@ export class Grid {
     if (result === 0) {
       throw new Error(`Failed to resize grid to ${rows}x${cols}`);
     }
+    this.#rows = rows;
+    this.#cols = cols;
   }
 
   /**
