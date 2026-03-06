@@ -30,6 +30,7 @@ use crate::types::*;
 struct RenderPipelines {
     bg_pipeline: wgpu::RenderPipeline,
     text_pipeline: wgpu::RenderPipeline,
+    selection_pipeline: wgpu::RenderPipeline,
     cursor_pipeline: wgpu::RenderPipeline,
     uniform_bind_group: wgpu::BindGroup,
     text_bind_group: wgpu::BindGroup,
@@ -55,11 +56,14 @@ pub struct Renderer {
     text_instance_buffer: wgpu::Buffer,
     atlas_texture: wgpu::Texture,
 
+    selection_instance_buffer: wgpu::Buffer,
+
     // State
     atlas: GlyphAtlas,
     config: RendererConfig,
     bg_instance_count: u32,
     text_instance_count: u32,
+    selection_instance_count: u32,
     start_time: Instant,
     max_cells: usize,
 
@@ -182,14 +186,14 @@ impl Renderer {
     /// Update instance buffers from the grid state, then render a frame.
     pub fn render_frame(&mut self, grid: &Arc<Mutex<Grid>>) -> Result<(), wgpu::SurfaceError> {
         // Lock grid, build instance data, release lock before GPU work
-        let (bg_instances, text_instances, cursor_row, cursor_col, cursor_visible) = {
+        let (bg_instances, text_instances, selection_instances, cursor_row, cursor_col, cursor_visible) = {
             let mut grid = lock_or_log(&grid, "renderer::render_frame");
             let result = self.build_instances(&grid);
             grid.clear_dirty();
             result
         };
 
-        self.upload_instances(&bg_instances, &text_instances, cursor_row, cursor_col, cursor_visible);
+        self.upload_instances(&bg_instances, &text_instances, &selection_instances, cursor_row, cursor_col, cursor_visible);
 
         // Re-upload atlas if new glyphs were rasterized
         if self.atlas.is_dirty() {
@@ -200,18 +204,17 @@ impl Renderer {
         self.encode_and_present()
     }
 
-    /// Build background and text instance data from the grid (public for FFI).
-    pub fn build_instances_from(&mut self, grid: &Grid) -> (Vec<BgInstance>, Vec<TextInstance>, usize, usize, bool) {
+    /// Build background, text, and selection instance data from the grid (public for FFI).
+    pub fn build_instances_from(&mut self, grid: &Grid) -> (Vec<BgInstance>, Vec<TextInstance>, Vec<SelectionInstance>, usize, usize, bool) {
         self.build_instances(grid)
     }
 
-    /// Build background and text instance data from the grid.
-    fn build_instances(&mut self, grid: &Grid) -> (Vec<BgInstance>, Vec<TextInstance>, usize, usize, bool) {
+    /// Build background, text, and selection instance data from the grid.
+    fn build_instances(&mut self, grid: &Grid) -> (Vec<BgInstance>, Vec<TextInstance>, Vec<SelectionInstance>, usize, usize, bool) {
         let rows = grid.rows();
         let cols = grid.cols();
         let (cw, ch) = self.cell_size();
         let ascent = self.atlas.ascent();
-        let screen = grid.active_screen();
 
         let default_bg = self.config.theme.background;
         let default_fg = self.config.theme.foreground;
@@ -220,14 +223,17 @@ impl Renderer {
         let mut text_instances = Vec::with_capacity(rows * cols);
 
         for row in 0..rows {
-            if row >= screen.rows.len() {
-                break;
-            }
+            // Use visible_row() to account for viewport_offset (scrollback navigation).
+            // When viewport_offset > 0, top rows come from scrollback history.
+            let row_cells = match grid.visible_row(row) {
+                Some(cells) => cells,
+                None => break,
+            };
             for col in 0..cols {
-                if col >= screen.rows[row].len() {
+                if col >= row_cells.len() {
                     break;
                 }
-                let cell = &screen.rows[row][col];
+                let cell = &row_cells[col];
 
                 let px = col as f32 * cw;
                 let py = row as f32 * ch;
@@ -256,7 +262,38 @@ impl Renderer {
             }
         }
 
-        (bg_instances, text_instances, grid.cursor.row, grid.cursor.col, grid.cursor.visible)
+        // Selection overlay instances
+        let mut selection_instances = Vec::new();
+        if let Some(sel) = grid.selection() {
+            let sel_color = self.config.theme.selection;
+            let (sr, sc) = (sel.start_row, sel.start_col);
+            let (er, ec) = (sel.end_row, sel.end_col);
+            // Normalize so sr <= er
+            let (sr, sc, er, ec) = if sr < er || (sr == er && sc <= ec) {
+                (sr, sc, er, ec)
+            } else {
+                (er, ec, sr, sc)
+            };
+            for r in sr..=er {
+                if r >= rows {
+                    break;
+                }
+                let col_start = if r == sr { sc } else { 0 };
+                let col_end = if r == er { ec } else { cols.saturating_sub(1) };
+                for c in col_start..=col_end {
+                    if c >= cols {
+                        break;
+                    }
+                    selection_instances.push(SelectionInstance {
+                        pos: [c as f32 * cw, r as f32 * ch],
+                        size: [cw, ch],
+                        color: sel_color,
+                    });
+                }
+            }
+        }
+
+        (bg_instances, text_instances, selection_instances, grid.cursor.row, grid.cursor.col, grid.cursor.visible)
     }
 
     /// Upload instance data and uniforms to GPU buffers.
@@ -264,6 +301,7 @@ impl Renderer {
         &mut self,
         bg_instances: &[BgInstance],
         text_instances: &[TextInstance],
+        selection_instances: &[SelectionInstance],
         cursor_row: usize,
         cursor_col: usize,
         cursor_visible: bool,
@@ -283,6 +321,12 @@ impl Renderer {
             self.text_instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("text_instance_buffer"),
                 size: (self.max_cells * std::mem::size_of::<TextInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.selection_instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("selection_instance_buffer"),
+                size: (self.max_cells * std::mem::size_of::<SelectionInstance>()) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -306,6 +350,15 @@ impl Renderer {
             );
         }
         self.text_instance_count = text_instances.len() as u32;
+
+        if !selection_instances.is_empty() {
+            self.queue.write_buffer(
+                &self.selection_instance_buffer,
+                0,
+                bytemuck::cast_slice(selection_instances),
+            );
+        }
+        self.selection_instance_count = selection_instances.len() as u32;
 
         // Upload uniforms
         let (cw, ch) = self.cell_size();
@@ -495,6 +548,13 @@ impl Renderer {
                 pass.draw(0..6, 0..self.text_instance_count);
             }
 
+            if self.selection_instance_count > 0 {
+                pass.set_pipeline(&rp.selection_pipeline);
+                pass.set_bind_group(0, &rp.uniform_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.selection_instance_buffer.slice(..));
+                pass.draw(0..6, 0..self.selection_instance_count);
+            }
+
             if self.cursor_visible {
                 pass.set_pipeline(&rp.cursor_pipeline);
                 pass.set_bind_group(0, &rp.cursor_bind_group, &[]);
@@ -679,6 +739,13 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let selection_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("selection_instance_buffer"),
+            size: (max_cells * std::mem::size_of::<SelectionInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // --- Render pipelines + bind groups (only when a surface is present) ---
         let render = if surface.is_some() {
             let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -780,11 +847,13 @@ impl Renderer {
 
             let bg_pipeline = pipelines::create_background_pipeline(&device, format, &uniform_bind_group_layout);
             let text_pipeline = pipelines::create_text_pipeline(&device, format, &text_bind_group_layout);
+            let selection_pipeline = pipelines::create_selection_pipeline(&device, format, &uniform_bind_group_layout);
             let cursor_pipeline = pipelines::create_cursor_pipeline(&device, format, &cursor_bind_group_layout);
 
             Some(RenderPipelines {
                 bg_pipeline,
                 text_pipeline,
+                selection_pipeline,
                 cursor_pipeline,
                 uniform_bind_group,
                 text_bind_group,
@@ -806,11 +875,13 @@ impl Renderer {
             cursor_uniform_buffer,
             bg_instance_buffer,
             text_instance_buffer,
+            selection_instance_buffer,
             atlas_texture,
             atlas,
             config,
             bg_instance_count: 0,
             text_instance_count: 0,
+            selection_instance_count: 0,
             start_time: Instant::now(),
             max_cells,
             cursor_visible: true,

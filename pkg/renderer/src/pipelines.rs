@@ -2,7 +2,7 @@
 
 use wgpu;
 
-use crate::types::{BgInstance, TextInstance};
+use crate::types::{BgInstance, SelectionInstance, TextInstance};
 
 /// Create the background render pipeline.
 pub fn create_background_pipeline(
@@ -131,6 +131,76 @@ pub fn create_text_pipeline(
                         format: wgpu::VertexFormat::Float32x2,
                         offset: 48,
                         shader_location: 4,
+                    },
+                ],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Create the selection overlay pipeline (alpha-blended instanced quads).
+pub fn create_selection_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    uniform_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("selection_shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../../resources/shaders/selection.wgsl").into()),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("selection_pipeline_layout"),
+        bind_group_layouts: &[uniform_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("selection_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<SelectionInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    // pos
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    // size
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                    // color
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 2,
                     },
                 ],
             }],

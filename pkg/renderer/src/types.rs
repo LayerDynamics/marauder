@@ -22,6 +22,15 @@ pub struct TextInstance {
     pub glyph_offset: [f32; 2],
 }
 
+/// Per-cell selection overlay instance data, uploaded to GPU.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SelectionInstance {
+    pub pos: [f32; 2],
+    pub size: [f32; 2],
+    pub color: [f32; 4],
+}
+
 /// Uniforms shared across background and text passes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -66,6 +75,7 @@ pub struct ThemeColors {
     pub foreground: [f32; 4],
     pub cursor: [f32; 4],
     pub selection: [f32; 4],
+    pub url: [f32; 4],
 }
 
 impl Default for ThemeColors {
@@ -76,6 +86,7 @@ impl Default for ThemeColors {
             foreground: [0.804, 0.839, 0.957, 1.0],  // #cdd6f4
             cursor: [0.537, 0.706, 0.980, 1.0],      // #89b4fa
             selection: [0.224, 0.243, 0.322, 0.5],    // #394060 @ 50%
+            url: [0.537, 0.706, 0.980, 1.0],            // #89b4fa (blue, same as cursor)
         }
     }
 }

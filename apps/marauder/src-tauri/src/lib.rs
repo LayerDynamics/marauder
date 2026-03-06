@@ -100,6 +100,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(event_bus.clone())
         .manage(webview_subs)
         .manage(TauriPtyManager::new())
@@ -331,6 +332,10 @@ pub fn run() {
                                     .clone();
 
                                 if let Some(ref grid) = grid {
+                                    // Renderer lock is held for upload+present. The grid lock
+                                    // inside render_frame is scoped to build_instances only,
+                                    // so Tauri commands that need the grid are not blocked
+                                    // during GPU work.
                                     let mut rend = renderer_for_render
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner());

@@ -30,4 +30,5 @@ marauder-renderer = { path = "../../../pkg/renderer" }
 marauder-compute = { path = "../../../pkg/compute" }
 marauder-runtime = { path = "../../../pkg/runtime", features = ["tauri-commands"] }
 marauder-config-store = { path = "../../../pkg/config-store", features = ["tauri-commands"] }
+tauri-plugin-clipboard-manager = "2"
 wgpu = { workspace = true }
