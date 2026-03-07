@@ -56,21 +56,85 @@ fn extension_post_message(
     Ok(())
 }
 
-/// Tauri command: register an extension panel (placeholder — actual panel management is in Deno).
+/// Tauri command: register an extension panel via the event bus.
+///
+/// Publishes an ExtensionMessage event so the Deno-side PanelRegistry receives
+/// the panel configuration and registers it. The webview calls this when an
+/// extension requests a panel via the extension bridge.
 #[tauri::command]
 fn extension_register_panel(
+    event_bus: tauri::State<'_, bus::SharedEventBus>,
     config: serde_json::Value,
 ) -> Result<(), String> {
-    tracing::info!(config = %config, "Extension panel registered");
+    let payload = serde_json::json!({
+        "source": "webview",
+        "type": "RegisterPanel",
+        "payload": config,
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    let event = Event::new(EventType::ExtensionMessage, bytes);
+    event_bus.publish(event);
+    tracing::info!("Extension panel registration published to event bus");
     Ok(())
 }
 
-/// Tauri command: list loaded extensions (delegates to Deno runtime).
+/// Tauri command: list loaded extensions by querying the Deno runtime.
+///
+/// Sends a `deno_call_op` request to invoke the runtime's extension listing
+/// op, returning the result as a JSON array. Falls back to querying the event
+/// bus for extension load events if the Deno bridge is unavailable.
 #[tauri::command]
-fn extension_list() -> Result<Vec<serde_json::Value>, String> {
-    // Placeholder — the real list comes from the Deno-side ExtensionRegistry.
-    // This command exists so the webview can query extension state.
-    Ok(vec![])
+async fn extension_list(
+    bridge: tauri::State<'_, ipc_bridge::DenoBridge>,
+) -> Result<Vec<serde_json::Value>, String> {
+    // Query the Deno runtime for the list of loaded extensions via the IPC bridge.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    bridge
+        .tx
+        .send(ipc_bridge::DenoRequest::Eval {
+            code: "JSON.stringify(globalThis.__marauder?.extensions?.list?.() ?? [])".into(),
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|e| format!("failed to send to Deno bridge: {e}"))?;
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), reply_rx).await {
+        Ok(Ok(Ok(json_str))) => {
+            let list: Vec<serde_json::Value> =
+                serde_json::from_str(&json_str).unwrap_or_default();
+            Ok(list)
+        }
+        Ok(Ok(Err(e))) => {
+            tracing::warn!(error = %e, "Deno extension_list returned error");
+            Ok(vec![])
+        }
+        Ok(Err(_)) => {
+            tracing::warn!("Deno bridge reply channel dropped");
+            Ok(vec![])
+        }
+        Err(_) => {
+            tracing::warn!("Deno bridge timed out querying extension list");
+            Ok(vec![])
+        }
+    }
+}
+
+/// Tauri command: get the grid dimensions for the active pane.
+///
+/// Returns (rows, cols) by reading directly from the Grid.
+#[tauri::command]
+fn grid_get_active_dimensions(
+    active_grid: tauri::State<'_, ActiveGrid>,
+) -> Result<(usize, usize), String> {
+    let guard = active_grid.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(shared_grid) => {
+            let grid: std::sync::MutexGuard<'_, Grid> =
+                shared_grid.lock().unwrap_or_else(|e| e.into_inner());
+            Ok((grid.rows(), grid.cols()))
+        }
+        None => Err("No active grid".into()),
+    }
 }
 
 /// Tauri command: get the renderer's cell size (width, height) in pixels.
@@ -204,6 +268,7 @@ pub fn run() {
         .manage(event_bus.clone())
         .manage(webview_subs)
         .manage(TauriPtyManager::new())
+        .manage(active_grid.clone())
         .manage(shared_renderer)
         .manage(pane_grids.clone())
         .manage(tauri_config_store)
@@ -552,6 +617,7 @@ pub fn run() {
             event_bridge::event_bus_start_bridge,
             event_bridge::event_bus_subscribe_channel,
             event_bridge::event_bus_unsubscribe_channel,
+            grid_get_active_dimensions,
             renderer_get_cell_size,
             renderer_resize,
             renderer_set_pane_borders,

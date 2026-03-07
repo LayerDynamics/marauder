@@ -81,6 +81,9 @@ export interface ExtensionContext {
   panels: ExtensionPanels;
 }
 
+/** Current extension API version. Extensions declare compatible versions via engines.marauder. */
+export const EXTENSION_API_VERSION = "1.0.0";
+
 /** Extension lifecycle state. */
 export type ExtensionState = "loaded" | "active" | "error" | "disabled";
 

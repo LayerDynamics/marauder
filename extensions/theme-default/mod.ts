@@ -301,7 +301,7 @@ export function activate(ctx: ExtensionContext): void {
       type?: string;
       payload?: { name?: string };
     };
-    if (msg.source !== "theme-default" && msg.type === "SetTheme") {
+    if (msg.source === "theme-default" && msg.type === "SetTheme") {
       const requested = ALL_THEMES.find((t) => t.name === msg.payload?.name);
       if (requested !== undefined) {
         ctx.config.set("theme", requested);

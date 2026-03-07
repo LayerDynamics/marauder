@@ -2,6 +2,7 @@
 // Extension discovery, validation, loading, and unloading.
 
 import type { ExtensionManifest, ExtensionModule } from "./types.ts";
+import { EXTENSION_API_VERSION } from "./types.ts";
 import { ExtensionRegistry } from "./registry.ts";
 import { CommandRegistry } from "./commands.ts";
 import { KeybindingRegistry } from "./keybindings.ts";
@@ -28,11 +29,21 @@ export function validateManifest(
 ): ExtensionManifest | null {
   const { name, version, description, entry } = json;
   if (
-    typeof name !== "string" ||
-    typeof version !== "string" ||
+    typeof name !== "string" || name.length === 0 ||
+    typeof version !== "string" || version.length === 0 ||
     typeof description !== "string" ||
-    typeof entry !== "string"
+    typeof entry !== "string" || entry.length === 0
   ) {
+    return null;
+  }
+
+  // Reject names with path separators or traversal patterns
+  if (/[/\\]/.test(name) || name.includes("..") || name.startsWith(".")) {
+    return null;
+  }
+
+  // Reject entry points that escape the extension directory
+  if (entry.includes("..") || entry.startsWith("/") || entry.startsWith("\\")) {
     return null;
   }
   return {
@@ -139,6 +150,18 @@ export class ExtensionLoader {
       return;
     }
 
+    // API version compatibility check
+    if (manifest.engines?.["marauder"]) {
+      const required = manifest.engines["marauder"];
+      if (!isCompatibleVersion(required, EXTENSION_API_VERSION)) {
+        const msg = `Requires marauder engine "${required}" but current API is "${EXTENSION_API_VERSION}"`;
+        console.error(`[marauder] Extension "${manifest.name}": ${msg}`);
+        this.registry.register(manifest, { activate() {}, deactivate() {} } as ExtensionModule, dir);
+        this.registry.setState(manifest.name, "error", msg);
+        return;
+      }
+    }
+
     // Dynamic import of the extension entry point
     const entryPath = `${dir}/${manifest.entry}`;
     let mod: ExtensionModule;
@@ -153,9 +176,10 @@ export class ExtensionLoader {
     }
 
     if (typeof mod.activate !== "function") {
-      console.error(
-        `[marauder] Extension "${manifest.name}" has no activate() export`,
-      );
+      const msg = `Extension "${manifest.name}" has no activate() export`;
+      console.error(`[marauder] ${msg}`);
+      this.registry.register(manifest, mod, dir);
+      this.registry.setState(manifest.name, "error", msg);
       return;
     }
 
@@ -221,18 +245,61 @@ export class ExtensionLoader {
     clearErrors(name);
   }
 
+  /** Extensions deferred for lazy activation, keyed by activation event. */
+  readonly #deferred = new Map<string, Array<{ manifest: ExtensionManifest; dir: string }>>();
+
   /**
    * Discover and load all extensions from default + custom directories.
-   * Returns the number of extensions loaded.
+   * Extensions with activationEvents are deferred until the event fires.
+   * Returns the number of extensions eagerly loaded.
    */
   async loadAll(dirs?: string[]): Promise<number> {
     const discovered = await discover(dirs);
+    const allNames = new Set(discovered.map(({ manifest }) => manifest.name));
     let count = 0;
+
     for (const { manifest, dir } of discovered) {
+      // Check declared dependencies are present
+      if (manifest.dependencies) {
+        const missing = Object.keys(manifest.dependencies).filter((dep) => !allNames.has(dep));
+        if (missing.length > 0) {
+          console.warn(
+            `[marauder] Extension "${manifest.name}" has missing dependencies: ${missing.join(", ")} — loading anyway`,
+          );
+        }
+      }
+
+      // Defer extensions that declare activation events
+      if (manifest.activationEvents && manifest.activationEvents.length > 0) {
+        for (const event of manifest.activationEvents) {
+          let list = this.#deferred.get(event);
+          if (!list) {
+            list = [];
+            this.#deferred.set(event, list);
+            // Subscribe to the event so deferred extensions auto-load
+            this.#services.eventOn(event, () => this.#activateDeferred(event));
+          }
+          list.push({ manifest, dir });
+        }
+        continue;
+      }
+
       await this.load(manifest, dir);
       count++;
     }
     return count;
+  }
+
+  /** Load deferred extensions when their activation event fires. */
+  async #activateDeferred(event: string): Promise<void> {
+    const pending = this.#deferred.get(event);
+    if (!pending) return;
+    this.#deferred.delete(event);
+    for (const { manifest, dir } of pending) {
+      if (!this.registry.has(manifest.name)) {
+        await this.load(manifest, dir);
+      }
+    }
   }
 
   /** Reload a specific extension (unload then load). */
@@ -247,4 +314,44 @@ export class ExtensionLoader {
     await this.unload(name);
     await this.load(manifest, dir);
   }
+}
+
+/**
+ * Check semver compatibility. Supports `^major.minor.patch` (caret range)
+ * and exact match. Returns true if `actual` satisfies `required`.
+ */
+export function isCompatibleVersion(required: string, actual: string): boolean {
+  const clean = required.replace(/^[~^]/, "");
+  const prefix = required.startsWith("^") ? "^" : required.startsWith("~") ? "~" : "";
+
+  const parse = (v: string): { major: number; minor: number; patch: number } | null => {
+    const parts = v.split(".");
+    if (parts.length < 1 || parts.length > 3) return null;
+    const nums = parts.map(Number);
+    if (nums.some((n) => !Number.isInteger(n) || n < 0)) return null;
+    return { major: nums[0] ?? 0, minor: nums[1] ?? 0, patch: nums[2] ?? 0 };
+  };
+
+  const req = parse(clean);
+  const act = parse(actual);
+
+  if (!req || !act) return false;
+
+  if (prefix === "^") {
+    // ^1.2.3 means >=1.2.3 <2.0.0 (for major > 0)
+    if (req.major > 0) {
+      return act.major === req.major &&
+        (act.minor > req.minor || (act.minor === req.minor && act.patch >= req.patch));
+    }
+    // ^0.x — minor must match
+    return act.major === 0 && act.minor === req.minor && act.patch >= req.patch;
+  }
+
+  if (prefix === "~") {
+    // ~1.2.3 means >=1.2.3 <1.3.0
+    return act.major === req.major && act.minor === req.minor && act.patch >= req.patch;
+  }
+
+  // Exact match
+  return act.major === req.major && act.minor === req.minor && act.patch === req.patch;
 }

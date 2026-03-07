@@ -4,7 +4,7 @@
 //! that clients can attach/detach from (like tmux/screen). It communicates
 //! with clients via the IPC layer (`pkg/ipc`).
 //!
-//! Phase 1: Core types, session tracking, and daemon lifecycle skeleton.
+//! Each session holds a live PTY, VT parser, and terminal grid.
 
 pub mod error;
 pub mod session;

@@ -127,6 +127,11 @@ impl MarauderDaemon {
         let _ = self.shutdown_rx.recv().await;
     }
 
+    /// Get a clone of the sessions map for external use (e.g., marauder-server).
+    pub fn sessions(&self) -> Arc<std::sync::Mutex<HashMap<SessionId, Session>>> {
+        Arc::clone(&self.sessions)
+    }
+
     /// Start the daemon, binding the IPC server.
     pub async fn start(&mut self) -> Result<(), DaemonError> {
         if self.server.is_some() {
@@ -155,8 +160,11 @@ impl MarauderDaemon {
         if let Some(server) = self.server.take() {
             server.shutdown().await;
         }
-        // Clean up sessions
+        // Clean up sessions — kill all PTY processes
         let mut sessions = lock_or_log(&self.sessions, "daemon::shutdown");
+        for (_, session) in sessions.iter_mut() {
+            session.kill();
+        }
         sessions.clear();
         tracing::info!("Marauder daemon shut down");
     }
@@ -201,14 +209,20 @@ impl MarauderDaemon {
                     );
                 }
 
-                let session = Session::new(shell, rows, cols);
-                let info = session.info();
-                let id = session.id;
-
-                locked.insert(id, session);
-                tracing::info!(session_id = id, "Session created");
-
-                IpcMessage::ok(0, Some(serde_json::to_value(info).unwrap()))
+                // Spawn a real PTY session
+                match Session::create(shell, rows, cols) {
+                    Ok(session) => {
+                        let info = session.info();
+                        let id = session.id;
+                        locked.insert(id, session);
+                        tracing::info!(session_id = id, "Session created with live PTY");
+                        IpcMessage::ok(0, Some(serde_json::to_value(info).unwrap()))
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create session: {e}");
+                        IpcMessage::error(0, format!("failed to spawn PTY: {e}"))
+                    }
+                }
             }
 
             IpcRequest::ListSessions => {
@@ -241,8 +255,10 @@ impl MarauderDaemon {
 
             IpcRequest::KillSession { session_id } => {
                 let mut sessions = lock_or_log(sessions, "daemon::kill_session");
-                match sessions.remove(&session_id) {
-                    Some(_) => {
+                match sessions.get_mut(&session_id) {
+                    Some(session) => {
+                        session.kill();
+                        sessions.remove(&session_id);
                         tracing::info!(session_id, "Session killed");
                         IpcMessage::ok(0, None)
                     }
@@ -254,21 +270,28 @@ impl MarauderDaemon {
                 let mut sessions = lock_or_log(sessions, "daemon::resize");
                 match sessions.get_mut(&session_id) {
                     Some(session) => {
-                        session.rows = rows;
-                        session.cols = cols;
-                        IpcMessage::ok(0, None)
+                        match session.resize(rows, cols) {
+                            Ok(()) => IpcMessage::ok(0, None),
+                            Err(e) => IpcMessage::error(0, format!("resize failed: {e}")),
+                        }
                     }
                     None => IpcMessage::error(0, format!("session not found: {session_id}")),
                 }
             }
 
-            IpcRequest::Write { session_id, data: _ } => {
-                // Phase 1 skeleton: acknowledge but don't actually write to PTY yet
-                let sessions = lock_or_log(sessions, "daemon::write");
-                if sessions.contains_key(&session_id) {
-                    IpcMessage::ok(0, None)
-                } else {
-                    IpcMessage::error(0, format!("session not found: {session_id}"))
+            IpcRequest::Write { session_id, data } => {
+                let mut sessions = lock_or_log(sessions, "daemon::write");
+                match sessions.get_mut(&session_id) {
+                    Some(session) => {
+                        match session.write_to_pty(&data) {
+                            Ok(n) => {
+                                tracing::trace!(session_id, bytes = n, "wrote to PTY");
+                                IpcMessage::ok(0, None)
+                            }
+                            Err(e) => IpcMessage::error(0, format!("write failed: {e}")),
+                        }
+                    }
+                    None => IpcMessage::error(0, format!("session not found: {session_id}")),
                 }
             }
 
@@ -341,7 +364,7 @@ mod tests {
         let sessions = make_sessions();
         let shutdown_tx = make_shutdown();
 
-        // Create
+        // Create a session with a real shell
         let resp = MarauderDaemon::handle_request(
             &sessions,
             DEFAULT_MAX_SESSIONS,
@@ -482,5 +505,84 @@ mod tests {
         );
         // Should have received the shutdown signal
         assert!(shutdown_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn test_write_to_session() {
+        let sessions = make_sessions();
+        let shutdown_tx = make_shutdown();
+
+        // Create a session
+        let resp = MarauderDaemon::handle_request(
+            &sessions,
+            DEFAULT_MAX_SESSIONS,
+            &shutdown_tx,
+            IpcRequest::CreateSession {
+                shell: Some("/bin/sh".into()),
+                rows: Some(24),
+                cols: Some(80),
+            },
+        );
+        // Extract session ID from the response
+        let session_id = if let marauder_ipc::message::IpcPayload::Response(IpcResponse::Ok { data }) = &resp.payload {
+            let info: serde_json::Value = data.clone().unwrap();
+            info["id"].as_u64().unwrap()
+        } else {
+            panic!("expected Ok response");
+        };
+
+        // Write to the session — should succeed
+        let resp = MarauderDaemon::handle_request(
+            &sessions,
+            DEFAULT_MAX_SESSIONS,
+            &shutdown_tx,
+            IpcRequest::Write {
+                session_id,
+                data: b"echo hello\n".to_vec(),
+            },
+        );
+        assert!(matches!(
+            resp.payload,
+            marauder_ipc::message::IpcPayload::Response(IpcResponse::Ok { .. })
+        ));
+    }
+
+    #[test]
+    fn test_resize_session() {
+        let sessions = make_sessions();
+        let shutdown_tx = make_shutdown();
+
+        // Create a session
+        let resp = MarauderDaemon::handle_request(
+            &sessions,
+            DEFAULT_MAX_SESSIONS,
+            &shutdown_tx,
+            IpcRequest::CreateSession {
+                shell: Some("/bin/sh".into()),
+                rows: Some(24),
+                cols: Some(80),
+            },
+        );
+        let session_id = if let marauder_ipc::message::IpcPayload::Response(IpcResponse::Ok { data }) = &resp.payload {
+            data.clone().unwrap()["id"].as_u64().unwrap()
+        } else {
+            panic!("expected Ok response");
+        };
+
+        // Resize — should succeed and update PTY + grid
+        let resp = MarauderDaemon::handle_request(
+            &sessions,
+            DEFAULT_MAX_SESSIONS,
+            &shutdown_tx,
+            IpcRequest::Resize {
+                session_id,
+                rows: 48,
+                cols: 120,
+            },
+        );
+        assert!(matches!(
+            resp.payload,
+            marauder_ipc::message::IpcPayload::Response(IpcResponse::Ok { .. })
+        ));
     }
 }

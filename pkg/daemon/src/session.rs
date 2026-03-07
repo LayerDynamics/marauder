@@ -1,12 +1,18 @@
 //! Daemon session tracking.
 //!
 //! Each session represents a terminal session with its own PTY, parser,
-//! grid, and pipeline — managed by a `MarauderRuntime` instance.
+//! grid, and pipeline — managed by the daemon.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+
+use marauder_grid::Grid;
+use marauder_parser::MarauderParser;
+use marauder_pty::{PtyConfig, PtyManager, PaneId};
 
 /// Unique session identifier.
 pub type SessionId = u64;
@@ -46,7 +52,7 @@ pub struct SessionInfo {
     pub attached_clients: u32,
 }
 
-/// A daemon-managed terminal session.
+/// A daemon-managed terminal session with live PTY, parser, and grid.
 pub struct Session {
     pub id: SessionId,
     pub state: SessionState,
@@ -55,12 +61,34 @@ pub struct Session {
     pub cols: u16,
     pub created_at: SystemTime,
     pub attached_clients: u32,
+    /// PTY manager holding the live PTY process for this session.
+    pub pty_manager: PtyManager,
+    /// The PaneId within the PtyManager for this session's PTY.
+    pub pane_id: PaneId,
+    /// VT parser for converting PTY output bytes to terminal actions.
+    pub parser: MarauderParser,
+    /// Terminal cell grid (primary + alternate screens).
+    pub grid: Grid,
 }
 
 impl Session {
-    /// Create a new session.
-    pub fn new(shell: String, rows: u16, cols: u16) -> Self {
-        Self {
+    /// Create a new session, spawning a real PTY process.
+    ///
+    /// Returns an error if the PTY cannot be spawned (e.g., invalid shell path).
+    pub fn create(shell: String, rows: u16, cols: u16) -> anyhow::Result<Self> {
+        let mut pty_manager = PtyManager::new();
+        let config = PtyConfig {
+            shell: shell.clone(),
+            env: HashMap::new(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            rows,
+            cols,
+        };
+        let pane_id = pty_manager.create(config)?;
+        let parser = MarauderParser::new();
+        let grid = Grid::new(rows as usize, cols as usize);
+
+        Ok(Self {
             id: next_session_id(),
             state: SessionState::Active,
             shell,
@@ -68,7 +96,11 @@ impl Session {
             cols,
             created_at: SystemTime::now(),
             attached_clients: 0,
-        }
+            pty_manager,
+            pane_id,
+            parser,
+            grid,
+        })
     }
 
     /// Convert to serializable info.
@@ -109,6 +141,60 @@ impl Session {
     pub fn mark_dead(&mut self) {
         self.state = SessionState::Dead;
     }
+
+    /// Write input data to the PTY (from client keyboard input).
+    pub fn write_to_pty(&mut self, data: &[u8]) -> anyhow::Result<usize> {
+        self.pty_manager.write(self.pane_id, data)
+    }
+
+    /// Read available data from the PTY, feed through parser, and apply to grid.
+    /// Returns the raw bytes read (for forwarding to the client).
+    pub fn read_and_process(&mut self) -> anyhow::Result<Option<Vec<u8>>> {
+        let mut buf = vec![0u8; 8192];
+        match self.pty_manager.read(self.pane_id, &mut buf) {
+            Ok(0) => Ok(None),
+            Ok(n) => {
+                let data = buf[..n].to_vec();
+                // Feed through parser → grid
+                let grid = &mut self.grid;
+                self.parser.feed(&data, |action| {
+                    grid.apply_action(&action);
+                });
+                Ok(Some(data))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Resize the PTY and grid.
+    pub fn resize(&mut self, rows: u16, cols: u16) -> anyhow::Result<()> {
+        self.pty_manager.resize(self.pane_id, rows, cols)?;
+        self.grid.resize(rows as usize, cols as usize);
+        self.rows = rows;
+        self.cols = cols;
+        Ok(())
+    }
+
+    /// Check if the PTY child process has exited.
+    pub fn check_alive(&mut self) -> bool {
+        match self.pty_manager.try_wait(self.pane_id) {
+            Ok(Some(_status)) => {
+                self.mark_dead();
+                false
+            }
+            Ok(None) => true, // still running
+            Err(_) => {
+                self.mark_dead();
+                false
+            }
+        }
+    }
+
+    /// Kill the PTY process and clean up.
+    pub fn kill(&mut self) {
+        let _ = self.pty_manager.close(self.pane_id);
+        self.mark_dead();
+    }
 }
 
 #[cfg(test)]
@@ -117,8 +203,8 @@ mod tests {
 
     #[test]
     fn test_session_ids_are_unique() {
-        let s1 = Session::new("/bin/sh".into(), 24, 80);
-        let s2 = Session::new("/bin/sh".into(), 24, 80);
+        let s1 = Session::create("/bin/sh".into(), 24, 80).unwrap();
+        let s2 = Session::create("/bin/sh".into(), 24, 80).unwrap();
         assert_ne!(s1.id, s2.id);
         assert!(s1.id > 0);
         assert!(s2.id > 0);
@@ -126,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_attach_detach() {
-        let mut s = Session::new("/bin/sh".into(), 24, 80);
+        let mut s = Session::create("/bin/sh".into(), 24, 80).unwrap();
         assert_eq!(s.state, SessionState::Active);
         assert_eq!(s.attached_clients, 0);
 
@@ -144,27 +230,54 @@ mod tests {
 
     #[test]
     fn test_mark_dead() {
-        let mut s = Session::new("/bin/sh".into(), 24, 80);
+        let mut s = Session::create("/bin/sh".into(), 24, 80).unwrap();
         s.mark_dead();
         assert_eq!(s.state, SessionState::Dead);
     }
 
     #[test]
     fn test_session_info() {
-        let s = Session::new("/bin/zsh".into(), 48, 120);
+        let s = Session::create("/bin/sh".into(), 48, 120).unwrap();
         let info = s.info();
         assert_eq!(info.id, s.id);
-        assert_eq!(info.shell, "/bin/zsh");
+        assert_eq!(info.shell, "/bin/sh");
         assert_eq!(info.rows, 48);
         assert_eq!(info.cols, 120);
-        // created_at_unix_secs should be a reasonable timestamp (after year 2020)
         assert!(info.created_at_unix_secs > 1_577_836_800);
     }
 
     #[test]
     fn test_detach_saturates() {
-        let mut s = Session::new("/bin/sh".into(), 24, 80);
+        let mut s = Session::create("/bin/sh".into(), 24, 80).unwrap();
         s.detach(); // already 0
         assert_eq!(s.attached_clients, 0);
+    }
+
+    #[test]
+    fn test_write_to_pty() {
+        let mut s = Session::create("/bin/sh".into(), 24, 80).unwrap();
+        let result = s.write_to_pty(b"echo hello\n");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resize() {
+        let mut s = Session::create("/bin/sh".into(), 24, 80).unwrap();
+        s.resize(48, 120).expect("resize should succeed");
+        assert_eq!(s.rows, 48);
+        assert_eq!(s.cols, 120);
+    }
+
+    #[test]
+    fn test_check_alive() {
+        let mut s = Session::create("/bin/sh".into(), 24, 80).unwrap();
+        assert!(s.check_alive());
+    }
+
+    #[test]
+    fn test_kill() {
+        let mut s = Session::create("/bin/sh".into(), 24, 80).unwrap();
+        s.kill();
+        assert_eq!(s.state, SessionState::Dead);
     }
 }
