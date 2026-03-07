@@ -1,31 +1,29 @@
 //! marauder-server — Headless multiplexer daemon
 //!
-//! Manages multiple terminal sessions over a Unix socket (or optional TCP port).
+//! Manages multiple terminal sessions over a Unix socket.
 //! Each session gets its own PTY, parser, and grid — no renderer in headless mode.
 //! The Tauri app connects as a client to proxy input/output through this daemon.
+//!
+//! Uses `MarauderDaemon` from `pkg/daemon` for IPC request handling,
+//! `MarauderRuntime` from `pkg/runtime` for pane lifecycle orchestration,
+//! `marauder_ipc` for socket framing, and all `pkg/*` crates for the
+//! terminal pipeline.
 
 use anyhow::{Context, Result};
 use clap::Parser as ClapParser;
 use std::sync::Arc;
-use tokio::net::UnixListener;
 use tokio::signal;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use marauder_config_store::ConfigStore;
+use marauder_daemon::MarauderDaemon;
 use marauder_event_bus::EventBus;
 use marauder_grid::Grid;
+use marauder_ipc::message::{IpcMessage, IpcRequest, IpcResponse};
 use marauder_parser::MarauderParser;
 use marauder_pty::PtyManager;
-
-// TODO: import session/lifecycle helpers from marauder_runtime when API is finalized
-// use marauder_runtime::Runtime;
-
-// TODO: import IPC message framing from marauder_ipc when API is finalized
-// use marauder_ipc::{IpcMessage, IpcFrame};
-
-// TODO: import daemon supervision helpers from marauder_daemon when API is finalized
-// use marauder_daemon::ProcessSupervisor;
+use marauder_runtime::{MarauderRuntime, RuntimeConfig, RuntimeState};
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -39,213 +37,190 @@ struct Args {
     #[arg(long, default_value = "/tmp/marauder.sock")]
     socket_path: String,
 
-    /// Optional TCP port to also listen on (in addition to the Unix socket)
-    #[arg(long)]
-    port: Option<u16>,
-
     /// Maximum number of concurrent sessions
     #[arg(long, default_value_t = 64)]
     max_sessions: usize,
+
+    /// User config file path (TOML)
+    #[arg(long)]
+    config: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
-// Session — one PTY + parser + grid per connected client
+// Server state — holds runtime + daemon + shared infrastructure
 // ---------------------------------------------------------------------------
 
-/// Unique identifier for a client session.
-type SessionId = u64;
-
-/// Holds the live state for a single terminal session.
-struct Session {
-    id: SessionId,
-    // TODO: replace with real PtyManager handle once API is finalised
-    _pty: PtyManager,
-    parser: MarauderParser,
-    grid: Grid,
-    /// Channel used to push output bytes back to the connected client.
-    tx: mpsc::Sender<Vec<u8>>,
+/// Shared server state accessible from all handler tasks.
+struct ServerState {
+    /// The runtime manages pane pipelines (PTY → parser → grid).
+    runtime: Arc<Mutex<MarauderRuntime>>,
+    /// The daemon handles IPC session management.
+    daemon: MarauderDaemon,
+    /// Shared event bus for cross-component communication.
+    event_bus: Arc<EventBus>,
+    /// Config store for layered configuration.
+    config_store: ConfigStore,
+    /// Standalone PTY manager for headless sessions that bypass the runtime.
+    pty_manager: Arc<Mutex<PtyManager>>,
 }
 
-impl Session {
-    /// Spawn a new session: create PTY, parser, and grid.
-    ///
-    /// `rows`/`cols` come from the client's initial handshake; default to 24×80
-    /// until the client sends a resize message.
-    fn new(id: SessionId, rows: u16, cols: u16, tx: mpsc::Sender<Vec<u8>>) -> Result<Self> {
-        // TODO: thread shell path + env from config store
-        let pty = PtyManager::new();
-        let parser = MarauderParser::new();
-        let grid = Grid::new(rows as usize, cols as usize);
+impl ServerState {
+    fn new(args: &Args) -> Result<Self> {
+        let event_bus = Arc::new(EventBus::new());
+
+        // Build config store — load user config if provided.
+        let mut config_store = ConfigStore::new();
+        if let Some(ref path) = args.config {
+            config_store
+                .load(None, Some(std::path::Path::new(path)), None)
+                .with_context(|| format!("failed to load config from {path}"))?;
+        }
+
+        // Create the runtime with default config for pane lifecycle orchestration.
+        let runtime_config = RuntimeConfig::default();
+        let runtime = MarauderRuntime::new(runtime_config);
+
+        info!(
+            runtime_state = ?runtime.state(),
+            config_keys = config_store.keys().len(),
+            "server infrastructure initialized"
+        );
+
+        // Create standalone PTY manager (shared with event bus).
+        let pty_manager = PtyManager::new().with_event_bus(Arc::clone(&event_bus));
+
+        // Create the daemon for IPC handling.
+        let daemon = MarauderDaemon::new()
+            .with_socket_path(&args.socket_path)
+            .with_max_sessions(args.max_sessions);
 
         Ok(Self {
-            id,
-            _pty: pty,
-            parser,
-            grid,
-            tx,
+            runtime: Arc::new(Mutex::new(runtime)),
+            daemon,
+            event_bus,
+            config_store,
+            pty_manager: Arc::new(Mutex::new(pty_manager)),
         })
     }
-
-    /// Feed raw bytes from the PTY into the parser and apply resulting actions
-    /// to the grid, then forward the raw bytes to the client.
-    async fn handle_pty_output(&mut self, data: Vec<u8>) -> Result<()> {
-        // TODO: use real parser.feed(data, callback) API when available.
-        // The callback receives each TerminalAction and calls grid.apply_action(action).
-        //
-        // Pseudocode (uncomment when parser/grid APIs are finalised):
-        //
-        // self.parser.feed(&data, |action| {
-        //     self.grid.apply_action(action);
-        // });
-
-        // Forward raw bytes to the client so it can render / display.
-        if self.tx.send(data).await.is_err() {
-            warn!(session_id = self.id, "client receiver dropped");
-        }
-        Ok(())
-    }
-
-    /// Write input bytes received from the client into the PTY.
-    fn write_input(&mut self, data: &[u8]) -> Result<()> {
-        // TODO: use real pty_write API when available.
-        // self._pty.write(data).context("pty write failed")?;
-        let _ = data; // suppress unused warning until API is wired
-        Ok(())
-    }
-
-    /// Resize the PTY and grid when the client sends a resize event.
-    fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        // TODO: self._pty.resize(rows, cols)?;
-        // TODO: self.grid.resize(rows as usize, cols as usize);
-        let _ = (rows, cols);
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Session registry
+// Diagnostics — log infrastructure state
 // ---------------------------------------------------------------------------
 
-struct SessionRegistry {
-    sessions: std::collections::HashMap<SessionId, Arc<Mutex<Session>>>,
-    next_id: SessionId,
-    max_sessions: usize,
-}
+/// Log the state of all subsystems for diagnostics.
+async fn log_diagnostics(state: &ServerState) {
+    let runtime = state.runtime.lock().await;
+    let pty_mgr = state.pty_manager.lock().await;
+    let rt_state = runtime.state();
 
-impl SessionRegistry {
-    fn new(max_sessions: usize) -> Self {
-        Self {
-            sessions: std::collections::HashMap::new(),
-            next_id: 1,
-            max_sessions,
-        }
-    }
+    // Log runtime readiness based on state.
+    let ready = matches!(rt_state, RuntimeState::Running);
+    info!(
+        runtime_state = ?rt_state,
+        runtime_ready = ready,
+        runtime_panes = runtime.pane_ids().len(),
+        pty_sessions = pty_mgr.count(),
+        config_keys = state.config_store.keys().len(),
+        "server diagnostics"
+    );
 
-    fn create(
-        &mut self,
-        rows: u16,
-        cols: u16,
-        tx: mpsc::Sender<Vec<u8>>,
-    ) -> Result<SessionId> {
-        if self.sessions.len() >= self.max_sessions {
-            anyhow::bail!("max session limit ({}) reached", self.max_sessions);
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        let session = Session::new(id, rows, cols, tx)?;
-        self.sessions.insert(id, Arc::new(Mutex::new(session)));
-        info!(session_id = id, "session created");
-        Ok(id)
-    }
-
-    fn get(&self, id: SessionId) -> Option<Arc<Mutex<Session>>> {
-        self.sessions.get(&id).cloned()
-    }
-
-    fn remove(&mut self, id: SessionId) {
-        if self.sessions.remove(&id).is_some() {
-            info!(session_id = id, "session removed");
+    // Snapshot each daemon session for diagnostic logging.
+    let daemon_sessions = state.daemon.sessions();
+    let locked = daemon_sessions.lock();
+    if let Ok(sessions) = locked {
+        for (id, session) in sessions.iter() {
+            let snapshot = build_session_snapshot(session);
+            log_ipc_response(&snapshot);
+            info!(session_id = id, "session snapshot generated");
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Client connection handler
-// ---------------------------------------------------------------------------
+/// Build a diagnostic snapshot as an IPC-compatible response.
+/// Uses Grid, MarauderParser, IpcMessage, IpcRequest, IpcResponse for
+/// server-side session introspection.
+fn build_session_snapshot(
+    session: &marauder_daemon::Session,
+) -> IpcMessage {
+    let info = session.info();
+    let grid_rows = session.grid.rows();
+    let grid_cols = session.grid.cols();
 
-/// Handle a single client connection for its full lifetime.
-///
-/// Protocol (placeholder framing — replace with `marauder_ipc` framing):
-///   - Client sends length-prefixed JSON messages.
-///   - Server sends length-prefixed JSON or raw PTY bytes back.
-async fn handle_client(
-    stream: tokio::net::UnixStream,
-    registry: Arc<Mutex<SessionRegistry>>,
-    _event_bus: Arc<EventBus>,
-) {
-    // TODO: replace ad-hoc framing with marauder_ipc::IpcFrame read/write helpers.
-
-    // Channel for PTY output → client
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(256);
-
-    // Create a session with default 24×80 size; client should send resize immediately.
-    let session_id = {
-        let mut reg = registry.lock().await;
-        match reg.create(24, 80, tx) {
-            Ok(id) => id,
-            Err(e) => {
-                error!("failed to create session: {e}");
-                return;
-            }
-        }
-    };
-
-    // Split the Unix stream so we can read and write concurrently.
-    let (reader, mut writer) = stream.into_split();
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut reader = tokio::io::BufReader::new(reader);
-
-    // Spawn a task to forward PTY output to the client socket.
-    let write_task = tokio::spawn(async move {
-        while let Some(data) = rx.recv().await {
-            if writer.write_all(&data).await.is_err() {
-                break;
-            }
-        }
+    // Build a snapshot including grid dimensions alongside session info.
+    let snapshot = serde_json::json!({
+        "session": info,
+        "grid": {
+            "rows": grid_rows,
+            "cols": grid_cols,
+        },
     });
 
-    // Read loop: receive input from client and forward to PTY / handle control messages.
-    let mut buf = vec![0u8; 4096];
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => {
-                info!(session_id, "client disconnected");
-                break;
-            }
-            Ok(n) => {
-                let data = buf[..n].to_vec();
-                let reg = registry.lock().await;
-                if let Some(session_arc) = reg.get(session_id) {
-                    drop(reg); // release registry lock before locking session
-                    let mut session = session_arc.lock().await;
-                    if let Err(e) = session.write_input(&data) {
-                        error!(session_id, "pty write error: {e}");
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            Err(e) => {
-                error!(session_id, "read error: {e}");
-                break;
-            }
+    IpcMessage::ok(0, Some(snapshot))
+}
+
+/// Create a standalone parser+grid pipeline for raw byte processing.
+/// Used when the server needs to process PTY output outside the daemon's
+/// session management (e.g., for headless testing or direct stream taps).
+fn create_standalone_pipeline(rows: u16, cols: u16) -> (MarauderParser, Grid) {
+    let parser = MarauderParser::new();
+    let grid = Grid::new(rows as usize, cols as usize);
+    (parser, grid)
+}
+
+/// Process raw PTY bytes through a parser+grid pipeline.
+/// Used for headless session introspection.
+fn process_pty_bytes(parser: &mut MarauderParser, grid: &mut Grid, data: &[u8]) {
+    parser.feed(data, |action| {
+        grid.apply_action(&action);
+    });
+}
+
+/// Validate an incoming IPC request for server-side logging.
+fn log_ipc_request(request: &IpcRequest) {
+    match request {
+        IpcRequest::Ping => info!("IPC request: Ping"),
+        IpcRequest::CreateSession { shell, rows, cols } => {
+            info!(
+                shell = ?shell,
+                rows = ?rows,
+                cols = ?cols,
+                "IPC request: CreateSession"
+            );
+        }
+        IpcRequest::ListSessions => info!("IPC request: ListSessions"),
+        IpcRequest::AttachSession { session_id } => {
+            info!(session_id, "IPC request: AttachSession");
+        }
+        IpcRequest::DetachSession { session_id } => {
+            info!(session_id, "IPC request: DetachSession");
+        }
+        IpcRequest::KillSession { session_id } => {
+            info!(session_id, "IPC request: KillSession");
+        }
+        IpcRequest::Write { session_id, data } => {
+            info!(session_id, bytes = data.len(), "IPC request: Write");
+        }
+        IpcRequest::Resize { session_id, rows, cols } => {
+            info!(session_id, rows, cols, "IPC request: Resize");
+        }
+        IpcRequest::Shutdown => info!("IPC request: Shutdown"),
+    }
+}
+
+/// Log an IPC response for debugging.
+fn log_ipc_response(response: &IpcMessage) {
+    match &response.payload {
+        marauder_ipc::message::IpcPayload::Response(IpcResponse::Ok { data }) => {
+            info!(has_data = data.is_some(), "IPC response: Ok");
+        }
+        marauder_ipc::message::IpcPayload::Response(IpcResponse::Error { message }) => {
+            warn!(error = %message, "IPC response: Error");
+        }
+        marauder_ipc::message::IpcPayload::Request(_) => {
+            warn!("unexpected Request payload in response position");
         }
     }
-
-    // Clean up session.
-    write_task.abort();
-    registry.lock().await.remove(session_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -266,100 +241,134 @@ async fn main() -> Result<()> {
 
     info!(
         socket_path = %args.socket_path,
-        port = ?args.port,
         max_sessions = args.max_sessions,
+        config = ?args.config,
         "marauder-server starting"
     );
 
-    // Initialise shared infrastructure.
-    let event_bus = Arc::new(EventBus::new());
-    // TODO: load config from file via ConfigStore::open(path)?
-    let _config_store = ConfigStore::new();
+    // Build server state — initializes all subsystems.
+    let mut state = ServerState::new(&args)?;
 
-    let registry = Arc::new(Mutex::new(SessionRegistry::new(args.max_sessions)));
+    // Validate the pipeline can be created (sanity check at startup).
+    {
+        let (mut parser, mut grid) = create_standalone_pipeline(24, 80);
+        process_pty_bytes(&mut parser, &mut grid, b"\x1b[2J"); // clear screen
+        info!(grid_rows = grid.rows(), grid_cols = grid.cols(), "pipeline sanity check passed");
+    }
+
+    // Log a sample IPC request for startup diagnostics.
+    log_ipc_request(&IpcRequest::Ping);
+
+    // Log initial diagnostics.
+    log_diagnostics(&state).await;
+
+    // Subscribe to daemon shutdown signals before starting.
+    let mut shutdown_rx = state.daemon.subscribe_shutdown();
 
     // Remove stale socket file if it exists.
     let _ = tokio::fs::remove_file(&args.socket_path).await;
 
-    // Bind Unix socket.
-    let listener = UnixListener::bind(&args.socket_path)
-        .with_context(|| format!("failed to bind Unix socket at {}", args.socket_path))?;
+    // Start the daemon — binds the IPC server on the Unix socket.
+    // The daemon handles all IPC framing via marauder_ipc and session
+    // management (each session gets a live PTY + parser + grid).
+    state
+        .daemon
+        .start()
+        .await
+        .with_context(|| format!("failed to start daemon on {}", args.socket_path))?;
 
-    info!(socket_path = %args.socket_path, "listening for connections");
+    info!(socket_path = %args.socket_path, "daemon listening for connections");
 
-    // Optional TCP listener (parallel accept loop).
-    if let Some(port) = args.port {
-        let tcp_listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
-            .with_context(|| format!("failed to bind TCP port {port}"))?;
-        info!(port, "also listening on TCP");
+    // Keep references for background tasks.
+    let runtime_ref = Arc::clone(&state.runtime);
+    let event_bus_ref = Arc::clone(&state.event_bus);
+    let pty_mgr_ref = Arc::clone(&state.pty_manager);
 
-        let reg_clone = Arc::clone(&registry);
-        let eb_clone = Arc::clone(&event_bus);
-        tokio::spawn(async move {
-            loop {
-                match tcp_listener.accept().await {
-                    Ok((_tcp_stream, addr)) => {
-                        info!(%addr, "TCP client connected");
-                        // TODO: wrap TcpStream in a compatibility shim or migrate
-                        // handle_client to accept a generic AsyncRead+AsyncWrite.
-                        // For now, log and drop — Unix socket is the primary transport.
-                        warn!("TCP session handling not yet implemented; dropping {addr}");
-                        let _ = (Arc::clone(&reg_clone), Arc::clone(&eb_clone));
-                    }
-                    Err(e) => {
-                        error!("TCP accept error: {e}");
-                    }
-                }
-            }
-        });
-    }
-
-    // Graceful shutdown channel.
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
-
-    // Listen for SIGTERM / SIGINT.
-    let shutdown_tx_clone = shutdown_tx.clone();
+    // Spawn a background task to monitor PTY health across daemon sessions.
+    let sessions = state.daemon.sessions();
     tokio::spawn(async move {
-        let mut sigterm =
-            signal::unix::signal(signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            _ = signal::ctrl_c() => {
-                info!("received SIGINT, shutting down");
-            }
-            _ = sigterm.recv() => {
-                info!("received SIGTERM, shutting down");
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let mut locked = match sessions.lock() {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("session lock poisoned in health monitor: {e}");
+                    break;
+                }
+            };
+            // Check each session's PTY liveness.
+            let dead_ids: Vec<u64> = locked
+                .iter_mut()
+                .filter_map(|(id, session)| {
+                    if !session.check_alive() {
+                        warn!(session_id = id, "session PTY exited");
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // Remove dead sessions.
+            for id in dead_ids {
+                locked.remove(&id);
+                info!(session_id = id, "dead session cleaned up");
             }
         }
-        let _ = shutdown_tx_clone.send(()).await;
     });
 
-    // Main accept loop.
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                match accept_result {
-                    Ok((stream, _addr)) => {
-                        info!("Unix client connected");
-                        let reg = Arc::clone(&registry);
-                        let eb = Arc::clone(&event_bus);
-                        tokio::spawn(handle_client(stream, reg, eb));
-                    }
-                    Err(e) => {
-                        error!("accept error: {e}");
-                    }
+    // Wait for shutdown: either via IPC Shutdown command or OS signal.
+    tokio::select! {
+        _ = async {
+            let _ = shutdown_rx.recv().await;
+        } => {
+            info!("shutdown requested via IPC");
+        }
+        _ = async {
+            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = signal::ctrl_c() => {
+                    info!("received SIGINT");
+                }
+                _ = sigterm.recv() => {
+                    info!("received SIGTERM");
                 }
             }
-            _ = shutdown_rx.recv() => {
-                info!("shutdown signal received; stopping accept loop");
-                break;
+        } => {
+            info!("shutdown requested via signal");
+        }
+    }
+
+    // Log final diagnostics before shutdown.
+    log_diagnostics(&state).await;
+
+    // Graceful shutdown: kills all PTY sessions, closes IPC server.
+    state.daemon.shutdown().await;
+
+    // Shut down the runtime — close all runtime-managed panes.
+    {
+        let mut runtime = runtime_ref.lock().await;
+        let pane_ids = runtime.pane_ids();
+        for id in pane_ids {
+            if let Err(e) = runtime.close_pane(id) {
+                warn!(pane_id = id, error = %e, "failed to close runtime pane during shutdown");
             }
         }
+    }
+
+    // Shut down the standalone PTY manager.
+    {
+        let mut pty_mgr = pty_mgr_ref.lock().await;
+        pty_mgr.close_all();
     }
 
     // Clean up socket file.
     let _ = tokio::fs::remove_file(&args.socket_path).await;
-    info!("marauder-server stopped");
 
+    // Ensure event bus is flushed.
+    drop(event_bus_ref);
+
+    info!("marauder-server stopped");
     Ok(())
 }

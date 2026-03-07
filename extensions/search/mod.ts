@@ -136,7 +136,7 @@ export function activate(ctx: ExtensionContext): void {
         type?: string;
         payload?: unknown;
       };
-      if (msg.source !== "search" && msg.type === "SearchResults") {
+      if (msg.source === "search" && msg.type === "SearchResults") {
         const result = msg.payload as SearchResultPayload;
         _currentMatches = result.matches;
         _currentMatchIndex = _currentMatches.length > 0 ? 0 : -1;
@@ -156,7 +156,7 @@ export function activate(ctx: ExtensionContext): void {
         type?: string;
         payload?: unknown;
       };
-      if (msg.source !== "search" && msg.type === "SearchQuery") {
+      if (msg.source === "search" && msg.type === "SearchQuery") {
         const query = msg.payload as SearchQueryPayload;
         if (query.pattern.length === 0) {
           _currentMatches = [];
@@ -185,7 +185,7 @@ export function activate(ctx: ExtensionContext): void {
         type?: string;
         payload?: unknown;
       };
-      if (msg.source !== "search" && msg.type === "SearchNavigate") {
+      if (msg.source === "search" && msg.type === "SearchNavigate") {
         const nav = msg.payload as SearchNavigatePayload;
         if (nav.direction === "next") {
           navigateTo(ctx, _currentMatchIndex + 1);

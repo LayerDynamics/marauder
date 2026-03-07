@@ -2,7 +2,7 @@
 name = "marauder"
 version = "0.1.0"
 description = "GPU-accelerated terminal emulator"
-authors = ["you"]
+authors = ["Ryan O'Boyle"]
 edition = "2021"
 
 [lib]

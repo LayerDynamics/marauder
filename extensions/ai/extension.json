@@ -1,0 +1,23 @@
+{
+  "name": "ai",
+  "version": "0.1.0",
+  "description": "AI-powered command suggestions, error explanation, chat panel, and autonomous agent mode for Marauder terminal.",
+  "entry": "mod.ts",
+  "permissions": [
+    "network",
+    "shell.read",
+    "shell.write",
+    "notifications",
+    "panels"
+  ],
+  "engines": {
+    "marauder": ">=1.0.0"
+  },
+  "activationEvents": [
+    "onCommand:ai.chat.toggle",
+    "onCommand:ai.suggest",
+    "onCommand:ai.explain",
+    "onCommand:ai.agent.start",
+    "onCommand:ai.configure"
+  ]
+}

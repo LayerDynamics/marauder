@@ -3073,9 +3073,13 @@ dependencies = [
 name = "marauder-daemon"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "libc",
  "marauder-event-bus",
+ "marauder-grid",
  "marauder-ipc",
+ "marauder-parser",
+ "marauder-pty",
  "serde",
  "serde_json",
  "tempfile",

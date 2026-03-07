@@ -10,11 +10,15 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 marauder-event-bus = { path = "../event-bus" }
 marauder-ipc = { path = "../ipc" }
+marauder-pty = { path = "../pty" }
+marauder-parser = { path = "../parser" }
+marauder-grid = { path = "../grid" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+anyhow = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
