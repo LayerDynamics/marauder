@@ -9,22 +9,53 @@ import type { ConfigStore } from "@marauder/ffi-config-store";
 /** Maps canonical key sequences (e.g. "Ctrl+T") to action names. */
 export type KeybindingConfig = Record<string, string>;
 
-/** Default keybindings shipped with Marauder. */
-export const DEFAULT_KEYBINDINGS: KeybindingConfig = {
-  "Ctrl+T": "new-tab",
-  "Ctrl+W": "close-tab",
-  "Ctrl+Tab": "next-tab",
-  "Ctrl+Shift+Tab": "prev-tab",
-  "Ctrl+Shift+N": "split-pane",
-  "Ctrl+Shift+W": "close-pane",
-  "Ctrl+Shift+Right": "focus-next",
-  "Ctrl+Shift+Left": "focus-prev",
-  "Ctrl+Shift+P": "command-palette",
-  "Ctrl+Shift+F": "search",
-  "Ctrl+Plus": "font-size-increase",
-  "Ctrl+Minus": "font-size-decrease",
-  "Ctrl+0": "font-size-reset",
-};
+/** Detect if running on macOS. */
+function isMacOS(): boolean {
+  // Works in both Deno and browser contexts
+  if (typeof globalThis.navigator !== "undefined") {
+    return globalThis.navigator.platform?.startsWith("Mac") ??
+      globalThis.navigator.userAgent?.includes("Mac") ?? false;
+  }
+  // Deno runtime
+  if (typeof Deno !== "undefined") {
+    return Deno.build.os === "darwin";
+  }
+  return false;
+}
+
+/** Base keybinding actions — platform modifier applied dynamically. */
+const KEYBINDING_ACTIONS: { mod: string; key: string; action: string }[] = [
+  { mod: "Mod", key: "T", action: "new-tab" },
+  { mod: "Mod", key: "W", action: "close-tab" },
+  { mod: "Ctrl", key: "Tab", action: "next-tab" },
+  { mod: "Ctrl+Shift", key: "Tab", action: "prev-tab" },
+  { mod: "Mod+Shift", key: "N", action: "split-pane" },
+  { mod: "Mod+Shift", key: "W", action: "close-pane" },
+  { mod: "Mod+Shift", key: "Right", action: "focus-next" },
+  { mod: "Mod+Shift", key: "Left", action: "focus-prev" },
+  { mod: "Mod+Shift", key: "P", action: "command-palette" },
+  { mod: "Mod+Shift", key: "F", action: "search" },
+  { mod: "Mod", key: "Plus", action: "font-size-increase" },
+  { mod: "Mod", key: "Minus", action: "font-size-decrease" },
+  { mod: "Mod", key: "0", action: "font-size-reset" },
+  { mod: "Ctrl", key: "Up", action: "jump-prev-prompt" },
+  { mod: "Ctrl", key: "Down", action: "jump-next-prompt" },
+  { mod: "Ctrl", key: "R", action: "history-search" },
+];
+
+/** Build platform-appropriate default keybindings. "Mod" becomes Meta on macOS, Ctrl elsewhere. */
+function buildDefaults(): KeybindingConfig {
+  const mac = isMacOS();
+  const config: KeybindingConfig = {};
+  for (const { mod, key, action } of KEYBINDING_ACTIONS) {
+    const resolvedMod = mac ? mod.replace("Mod", "Meta") : mod.replace("Mod", "Ctrl");
+    config[`${resolvedMod}+${key}`] = action;
+  }
+  return config;
+}
+
+/** Default keybindings shipped with Marauder (platform-aware). */
+export const DEFAULT_KEYBINDINGS: KeybindingConfig = buildDefaults();
 
 /** Canonical modifier order: Ctrl → Alt → Shift → Meta. */
 const MODIFIER_ORDER = ["Ctrl", "Alt", "Shift", "Meta"] as const;

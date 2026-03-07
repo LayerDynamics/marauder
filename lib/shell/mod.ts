@@ -9,6 +9,31 @@ import { type EventBus, EventType } from "@marauder/ffi-event-bus";
 import type { BusEvent } from "@marauder/ffi-event-bus";
 import type { Grid } from "@marauder/ffi-grid";
 import { decodeBusPayload, Logger } from "@marauder/dev";
+import { CommandHistory } from "./history.ts";
+import { PromptTracker } from "./prompt.ts";
+import {
+  CompletionEngine,
+  HistoryCompletionProvider,
+  PathCompletionProvider,
+} from "./completions.ts";
+
+export type { FuzzyMatch, HistoryConfig } from "./history.ts";
+export { CommandHistory } from "./history.ts";
+export type {
+  CompletionContext,
+  CompletionItem,
+  CompletionKind,
+  CompletionProvider,
+} from "./completions.ts";
+export { CompletionEngine, HistoryCompletionProvider, PathCompletionProvider } from "./completions.ts";
+export type { PromptInfo } from "./prompt.ts";
+export { PromptTracker } from "./prompt.ts";
+export {
+  detectShell,
+  getIntegrationScript,
+  injectShellIntegration,
+  isInjected,
+} from "./inject.ts";
 
 export interface ShellZone {
   type: "prompt" | "command" | "output";
@@ -25,12 +50,16 @@ export interface CommandRecord {
   exitCode?: number;
 }
 
+const MAX_ZONES = 10000;
+
 export class ShellEngine {
   readonly #eventBus: EventBus;
   readonly #grid: Grid;
   readonly #log: Logger;
-  readonly #history: CommandRecord[] = [];
+  readonly #history: CommandHistory;
   readonly #zones: ShellZone[] = [];
+  readonly #promptTracker: PromptTracker;
+  readonly #completionEngine: CompletionEngine;
   #cwd: string;
   #currentCommand: CommandRecord | null = null;
   #subscriberId: bigint | null = null;
@@ -41,6 +70,11 @@ export class ShellEngine {
     this.#grid = grid;
     this.#cwd = initialCwd;
     this.#log = new Logger("shell-engine");
+    this.#history = new CommandHistory();
+    this.#promptTracker = new PromptTracker();
+    this.#completionEngine = new CompletionEngine();
+    this.#completionEngine.registerProvider(new HistoryCompletionProvider());
+    this.#completionEngine.registerProvider(new PathCompletionProvider());
   }
 
   /** Start listening for parser actions on the event bus */
@@ -71,28 +105,37 @@ export class ShellEngine {
     const payload = this.#decodePayload(event);
     if (!payload) return;
 
-    const actionType = payload.type as string;
-
-    // OSC dispatch — look for shell integration sequences
-    if (actionType === "OscDispatch") {
-      this.#handleOsc(payload);
+    // Rust serde externally-tagged enum: {"VariantName": {...}}
+    // Dispatch based on the variant key present in the payload
+    if (payload["OscDispatch"]) {
+      const oscData = payload["OscDispatch"] as { command: number; data: string };
+      this.#handleOsc(oscData.command, oscData.data ?? "");
+    } else if (payload["SetMode"]) {
+      this.#log.debug(`SetMode action received: ${JSON.stringify(payload["SetMode"])}`);
+    } else if (payload["Print"]) {
+      // Print actions are high-frequency, no logging needed
+    } else if (payload["CursorMove"]) {
+      this.#log.debug(`CursorMove action received`);
+    } else if (payload["Execute"]) {
+      // Control character execution (e.g. BEL, BS, CR, LF)
+    } else {
+      // Log unhandled variants for future implementation
+      const variant = Object.keys(payload)[0];
+      if (variant) {
+        this.#log.debug(`Unhandled parser action variant: ${variant}`);
+      }
     }
   }
 
-  #handleOsc(payload: Record<string, unknown>): void {
-    const params = payload.params as number[] | undefined;
-    const data = payload.data as string | undefined;
-
-    if (!params || params.length === 0) return;
-
+  #handleOsc(command: number, data: string): void {
     // OSC 133 — Shell integration (FinalTerm)
-    if (params[0] === 133) {
-      this.#handleOsc133(data ?? "");
+    if (command === 133) {
+      this.#handleOsc133(data);
     }
 
     // OSC 7 — Current working directory
-    if (params[0] === 7) {
-      this.#handleOsc7(data ?? "");
+    if (command === 7) {
+      this.#handleOsc7(data);
     }
   }
 
@@ -130,6 +173,11 @@ export class ShellEngine {
    * - 133;D;exitcode — Command finished
    */
   #handleOsc133(data: string): void {
+    // Prevent unbounded zone growth
+    if (this.#zones.length >= MAX_ZONES) {
+      this.#zones.splice(0, Math.floor(MAX_ZONES / 4));
+    }
+
     const parts = data.split(";");
     const code = parts[0];
     const cursorRow = this.#getCursorRow();
@@ -150,6 +198,7 @@ export class ShellEngine {
           startRow: cursorRow,
           endRow: cursorRow,
         });
+        this.#promptTracker.recordPrompt(cursorRow, this.#cwd);
         this.#eventBus.publish(EventType.ShellPromptDetected, {
           cwd: this.#cwd,
         });
@@ -177,12 +226,15 @@ export class ShellEngine {
           commandRow,
           Infinity,
         );
-        // Strip prompt prefix — the command is typically on the last line after the prompt char
+        // Strip prompt prefix — find the last prompt delimiter on the final line
         const lines = commandText.split("\n");
         const lastLine = lines[lines.length - 1] ?? "";
-        // Remove common prompt patterns ($ , % , > , # ) from the beginning
-        const strippedCommand = lastLine.replace(/^[^$%>#]*[$%>#]\s*/, "")
-          .trim();
+        // Find the last occurrence of a prompt delimiter ($ % # >) followed by whitespace
+        // This handles complex prompts like "user@host:~/path>"
+        const promptMatch = lastLine.match(/^.*[\$%#>]\s*/);
+        const strippedCommand = promptMatch
+          ? lastLine.slice(promptMatch[0].length).trim()
+          : lastLine.trim();
 
         this.#zones.push({
           type: "command",
@@ -197,6 +249,7 @@ export class ShellEngine {
           cwd: this.#cwd,
           startTime: Date.now(),
         };
+        this.#promptTracker.recordCommand(strippedCommand);
 
         this.#log.debug(`Command captured: "${strippedCommand}"`);
         break;
@@ -236,7 +289,8 @@ export class ShellEngine {
         if (this.#currentCommand) {
           this.#currentCommand.endTime = Date.now();
           this.#currentCommand.exitCode = exitCode;
-          this.#history.push(this.#currentCommand);
+          this.#history.add(this.#currentCommand);
+          this.#promptTracker.recordFinish(exitCode);
           this.#eventBus.publish(EventType.ShellCommandFinished, {
             command: this.#currentCommand.command,
             exitCode,
@@ -267,12 +321,10 @@ export class ShellEngine {
       }
     } catch {
       // Not a valid URL — might be a raw path, validate it starts with /
-      if (data.startsWith("/") && data.length > 1) {
-        if (data !== this.#cwd) {
-          this.#cwd = data;
-          this.#eventBus.publish(EventType.ShellCwdChanged, { cwd: data });
-          this.#log.debug(`CWD changed (raw path): ${data}`);
-        }
+      if (data.startsWith("/") && data.length > 1 && data !== this.#cwd) {
+        this.#cwd = data;
+        this.#eventBus.publish(EventType.ShellCwdChanged, { cwd: data });
+        this.#log.debug(`CWD changed (raw path): ${data}`);
       }
     }
   }
@@ -290,14 +342,27 @@ export class ShellEngine {
   }
 
   getHistory(): CommandRecord[] {
-    return [...this.#history];
+    return this.#history.getAll();
   }
 
   getLastCommand(): CommandRecord | undefined {
-    return this.#history[this.#history.length - 1];
+    const all = this.#history.getAll();
+    return all[all.length - 1];
   }
 
   getZones(): ShellZone[] {
     return [...this.#zones];
+  }
+
+  getCommandHistory(): CommandHistory {
+    return this.#history;
+  }
+
+  getPromptTracker(): PromptTracker {
+    return this.#promptTracker;
+  }
+
+  getCompletionEngine(): CompletionEngine {
+    return this.#completionEngine;
   }
 }
