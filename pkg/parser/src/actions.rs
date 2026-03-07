@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+/// Serde helper for `Arc<[u8]>` — serializes as a byte sequence, deserializes via Vec.
+mod arc_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S: Serializer>(data: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error> {
+        <Vec<u8>>::serialize(&data.to_vec(), serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<[u8]>, D::Error> {
+        let v = <Vec<u8>>::deserialize(deserializer)?;
+        Ok(v.into())
+    }
+}
+
 /// SGR (Select Graphic Rendition) attribute types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SgrAttribute {
@@ -184,6 +199,12 @@ pub enum TerminalAction {
     Backspace,
     /// Tab.
     Tab,
+
+    // -- Image protocols --
+    /// Sixel graphics data (DCS sequence). Uses Arc for cheap cloning through the event bus.
+    SixelData { #[serde(with = "arc_bytes")] data: std::sync::Arc<[u8]> },
+    /// iTerm2 inline image protocol data (OSC 1337). Uses Arc for cheap cloning through the event bus.
+    ITermImage { #[serde(with = "arc_bytes")] data: std::sync::Arc<[u8]> },
 
     // -- Raw fallback --
     /// CSI dispatch not matched to a specific action (raw params preserved).

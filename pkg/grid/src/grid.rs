@@ -67,6 +67,10 @@ pub struct Grid {
     /// Viewport scroll offset (0 = at bottom / live, >0 = scrolled up into history).
     /// Use `viewport_offset()`, `scroll_viewport()`, or `scroll_viewport_by()` to access/modify.
     viewport_offset: usize,
+    /// Actions that the grid cannot handle internally (e.g. image protocols, device queries).
+    /// Higher layers should drain this queue via `drain_pending_actions()` and forward
+    /// them to the event bus or other subsystems.
+    pending_actions: Vec<TerminalAction>,
 }
 
 impl fmt::Debug for Grid {
@@ -97,6 +101,7 @@ impl Grid {
             scroll_bottom: rows,
             selection: None,
             viewport_offset: 0,
+            pending_actions: Vec::new(),
         }
     }
 
@@ -214,6 +219,18 @@ impl Grid {
     /// Read-only access to the viewport scroll offset.
     pub fn viewport_offset(&self) -> usize {
         self.viewport_offset
+    }
+
+    /// Drain queued actions that the grid cannot handle internally.
+    /// Higher layers should call this after `apply_action` batches and forward
+    /// the results to the event bus (e.g. SixelData, ITermImage, DeviceStatusReport).
+    pub fn drain_pending_actions(&mut self) -> Vec<TerminalAction> {
+        std::mem::take(&mut self.pending_actions)
+    }
+
+    /// Check if there are pending actions to drain.
+    pub fn has_pending_actions(&self) -> bool {
+        !self.pending_actions.is_empty()
     }
 
     /// Return the row of cells that should be displayed at a given visible row index,
@@ -502,8 +519,10 @@ impl Grid {
             TerminalAction::DesignateCharSet { .. } | TerminalAction::SetCursorStyle(_) |
             TerminalAction::OscDispatch { .. } | TerminalAction::DeviceStatusReport(_) |
             TerminalAction::SendDeviceAttributes | TerminalAction::CsiRaw { .. } |
-            TerminalAction::EscRaw { .. } => {
-                // These are forwarded via event bus or handled by higher layers
+            TerminalAction::EscRaw { .. } |
+            TerminalAction::SixelData { .. } | TerminalAction::ITermImage { .. } => {
+                // Queue for higher layers to drain via drain_pending_actions()
+                self.pending_actions.push(action.clone());
             }
         }
     }

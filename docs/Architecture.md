@@ -515,6 +515,7 @@ The webview handles **UI chrome only** — not the terminal grid:
 - **Notifications** — toast messages
 
 The terminal grid area is transparent in the webview, with wgpu rendering underneath.
+`macOSPrivateApi: true` is required in `tauri.conf.json` because Tauri's transparent window and `windowEffects` (vibrancy) support on macOS depends on private NSWindow APIs for proper compositing of the wgpu surface behind the webview.
 
 ### Frontend Stack
 

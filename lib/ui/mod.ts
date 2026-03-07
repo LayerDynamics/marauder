@@ -9,6 +9,11 @@ import {
   TerminalPipeline,
 } from "@marauder/io/pipeline.ts";
 import { decodeBusPayload, Logger } from "@marauder/dev";
+import { LayoutEngine } from "./layout.ts";
+export { LayoutEngine } from "./layout.ts";
+export type { LayoutNode, SerializedLayoutNode, Rect, Direction } from "./layout.ts";
+export { saveSession, restoreSession, autoSave, autoRestore } from "./session.ts";
+export type { SessionData, SerializedTab } from "./session.ts";
 
 const MAX_PANES = 256;
 const MAX_TABS = 64;
@@ -192,6 +197,7 @@ export class TabManager {
   readonly #paneManager: PaneManager;
   readonly #eventBus: EventBus;
   readonly #log: Logger;
+  readonly #layouts = new Map<number, LayoutEngine>();
   #nextId = 1;
   #activeTab: number | null = null;
   #panClosedSubId: bigint | null = null;
@@ -251,6 +257,7 @@ export class TabManager {
     };
 
     this.#tabs.set(id, tab);
+    this.#layouts.set(id, new LayoutEngine(pane.id));
     if (this.#activeTab === null) this.#activeTab = id;
 
     this.#eventBus.publish(EventType.TabCreated, {
@@ -272,6 +279,7 @@ export class TabManager {
       await this.#paneManager.closePane(paneId);
     }
     this.#tabs.delete(id);
+    this.#layouts.delete(id);
 
     if (this.#activeTab === id) {
       const first = this.#tabs.keys().next();
@@ -325,6 +333,63 @@ export class TabManager {
 
   listTabs(): Tab[] {
     return [...this.#tabs.values()] as Tab[];
+  }
+
+  /** Rename a tab. Publishes a TabRenamed event. */
+  renameTab(id: number, title: string): void {
+    const tab = this.#tabs.get(id);
+    if (!tab) {
+      this.#log.warn(`renameTab: tab ${id} not found`);
+      return;
+    }
+    tab.title = title;
+    this.#eventBus.publish(EventType.ExtensionMessage, {
+      type: "tab-renamed",
+      tabId: id,
+      title,
+    });
+    this.#log.info(`Renamed tab ${id}: ${title}`);
+  }
+
+  /**
+   * Split the active pane in a tab, creating a new pane alongside it.
+   * Returns the new pane, or null if the tab or layout was not found.
+   */
+  splitPane(
+    tabId: number,
+    direction: "horizontal" | "vertical",
+  ): Pane | null {
+    const tab = this.#tabs.get(tabId);
+    const layout = this.#layouts.get(tabId);
+    if (!tab || !layout) {
+      this.#log.warn(`splitPane: tab ${tabId} not found`);
+      return null;
+    }
+
+    const activePaneId = tab.activePane;
+    if (activePaneId === null) {
+      this.#log.warn(`splitPane: tab ${tabId} has no active pane`);
+      return null;
+    }
+
+    const newPane = this.#paneManager.createPane({ title: `Pane (split)` });
+    tab.paneIds.push(newPane.id);
+    layout.split(activePaneId, direction, newPane.id);
+
+    this.#log.info(
+      `Split pane ${activePaneId} ${direction} in tab ${tabId}, new pane ${newPane.id}`,
+    );
+    return newPane as Pane;
+  }
+
+  /** Get the layout engine for a tab. */
+  getLayout(tabId: number): LayoutEngine | undefined {
+    return this.#layouts.get(tabId);
+  }
+
+  /** Get the layouts map (for session save/restore). */
+  getLayouts(): Map<number, LayoutEngine> {
+    return this.#layouts;
   }
 
   [Symbol.dispose](): void {

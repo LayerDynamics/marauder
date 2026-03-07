@@ -4,7 +4,7 @@
  * Wraps the C ABI exported by `libmarauder_renderer` in an ergonomic TypeScript class.
  */
 
-import { resolve } from "jsr:@std/path@^1.0.0";
+import { resolveLibPath } from "../_lib.ts";
 
 /** Theme color map for the renderer. */
 export interface ThemeColors {
@@ -59,31 +59,7 @@ const CURSOR_STYLE_MAP: Record<CursorStyle, number> = {
   bar: 2,
 };
 
-function findLibPath(): string {
-  const envDir = Deno.env.get("MARAUDER_LIB_DIR");
-  const ext = Deno.build.os === "darwin"
-    ? "dylib"
-    : Deno.build.os === "windows"
-    ? "dll"
-    : "so";
-  const name = `libmarauder_renderer.${ext}`;
-
-  if (envDir) {
-    return resolve(envDir, name);
-  }
-  for (const profile of ["release", "debug"]) {
-    const path = resolve("target", profile, name);
-    try {
-      Deno.statSync(path);
-      return path;
-    } catch {
-      // continue
-    }
-  }
-  return resolve("target", "debug", name);
-}
-
-const lib = Deno.dlopen(findLibPath(), {
+const lib = Deno.dlopen(resolveLibPath("marauder_renderer"), {
   renderer_create: {
     parameters: ["u32", "u32", "f32", "buffer", "usize"],
     result: "pointer",

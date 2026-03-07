@@ -8,6 +8,7 @@ import { EventBusClient, PtyClient, GridClient } from "./ipc";
 import { detectUrlsInRow, findUrlAtCell, openUrl, type UrlMatch } from "../../../lib/ui/url-handler";
 import { TabBar } from "./components/tab-bar";
 import { StatusBar } from "./components/status-bar";
+import { SearchBar } from "./components/search-bar";
 import {
   EventType,
   type BusEvent,
@@ -17,6 +18,13 @@ import {
   type GridResizedPayload,
   type PanePayload,
 } from "./types";
+import {
+  CSI_TILDE_KEYS,
+  CSI_LETTER_KEYS,
+  SS3_FUNCTION_KEYS,
+  CTRL_SPECIAL,
+  computeXtermModifier,
+} from "../../../lib/io/vt-keymap";
 
 const eventBus = new EventBusClient();
 const ptyClient = new PtyClient();
@@ -24,6 +32,7 @@ const gridClient = new GridClient();
 
 let tabBar: TabBar;
 let statusBar: StatusBar;
+let searchBar: SearchBar;
 let activePaneId: number | null = null;
 let tabCounter = 0;
 
@@ -39,6 +48,9 @@ let selectionAnchorCol = 0;
 /** Cached URL matches for the visible grid area. */
 let cachedUrlMatches: UrlMatch[] = [];
 
+/** Cached layout rectangles for multi-pane hit testing. */
+let layoutRects: Map<number, { x: number; y: number; w: number; h: number }> = new Map();
+
 /** Convert pixel coordinates relative to grid element to cell coordinates. */
 function pixelToCell(x: number, y: number): { row: number; col: number } {
   const cw = cellWidth || 8.4;
@@ -49,16 +61,68 @@ function pixelToCell(x: number, y: number): { row: number; col: number } {
   };
 }
 
-/** Wheel handler for scrollback — stored for teardown removal. */
+/** Smooth scroll state. */
+let scrollTarget = 0;
+let scrollCurrent = 0;
+let scrollAnimating = false;
+
+/** Maximum scroll accumulation in pixels (~500 lines at default cell height). */
+const MAX_SCROLL_ACCUMULATION = 8400;
+
+/** Reset scroll state — call on pane/tab switch to prevent momentum leak. */
+function resetScrollState(): void {
+  scrollTarget = 0;
+  scrollCurrent = 0;
+  scrollAnimating = false;
+}
+
+/** Eased scrolling loop using requestAnimationFrame. */
+function animateScroll(): void {
+  if (!scrollAnimating) return;
+
+  const diff = scrollTarget - scrollCurrent;
+  if (Math.abs(diff) < 0.5) {
+    // Snap to target and clear fractional offset
+    scrollCurrent = scrollTarget;
+    scrollAnimating = false;
+    invoke("renderer_set_scroll_offset", { offset: 0 }).catch(() => {});
+    return;
+  }
+
+  scrollCurrent += diff * 0.3;
+  requestAnimationFrame(animateScroll);
+
+  // Integer part = full lines to scroll via grid
+  const ch = cellHeight || 16.8;
+  const fullLines = Math.trunc(scrollCurrent / ch);
+  const fractional = scrollCurrent - fullLines * ch;
+
+  if (fullLines !== 0 && activePaneId !== null) {
+    gridClient.scrollViewportBy(activePaneId, fullLines).catch((err) => {
+      console.error("Scroll failed:", err);
+    });
+    // Remove consumed full lines from both current and target
+    scrollCurrent -= fullLines * ch;
+    scrollTarget -= fullLines * ch;
+  }
+
+  // Pass fractional pixel offset to renderer for subpixel smooth scrolling
+  invoke("renderer_set_scroll_offset", { offset: fractional }).catch(() => {});
+}
+
+/** Wheel handler for scrollback — smooth eased scrolling. */
 function handleWheel(e: WheelEvent): void {
   if (activePaneId === null) return;
   e.preventDefault();
-  const lines = Math.round(e.deltaY / (cellHeight || 16.8));
-  if (lines !== 0) {
-    // Positive deltaY = scroll down in browser = scroll up into history (positive offset)
-    gridClient.scrollViewportBy(activePaneId, lines).catch((err) => {
-      console.error("Scroll failed:", err);
-    });
+
+  scrollTarget = Math.max(
+    -MAX_SCROLL_ACCUMULATION,
+    Math.min(MAX_SCROLL_ACCUMULATION, scrollTarget + e.deltaY),
+  );
+
+  if (!scrollAnimating) {
+    scrollAnimating = true;
+    requestAnimationFrame(animateScroll);
   }
 }
 
@@ -89,9 +153,59 @@ async function detectVisibleUrls(): Promise<void> {
   }
 }
 
+/**
+ * Update layout rects from backend and send pane borders to renderer.
+ * Called when panes are split/closed or the window is resized.
+ */
+async function updateLayoutRects(): Promise<void> {
+  // Layout rects are managed by the Deno-side TabManager.
+  // For now, track a single-pane layout (multi-pane routing will use
+  // the rects map once the backend provides layout data via events).
+  if (activePaneId !== null) {
+    const gridEl = document.getElementById("terminal-grid");
+    if (gridEl) {
+      layoutRects.clear();
+      layoutRects.set(activePaneId, {
+        x: 0,
+        y: 0,
+        w: gridEl.clientWidth,
+        h: gridEl.clientHeight,
+      });
+    }
+  }
+}
+
+/**
+ * Determine which pane was clicked based on layout rects.
+ * Returns the pane ID or null if no match.
+ */
+function getPaneAtPixel(px: number, py: number): number | null {
+  for (const [paneId, rect] of layoutRects) {
+    if (px >= rect.x && px < rect.x + rect.w && py >= rect.y && py < rect.y + rect.h) {
+      return paneId;
+    }
+  }
+  return null;
+}
+
 /** Handle mousedown on terminal grid — start selection. */
 function handleMouseDown(e: MouseEvent): void {
   if (activePaneId === null || e.button !== 0) return;
+
+  // Multi-pane: focus the clicked pane region
+  if (layoutRects.size > 1) {
+    const gridEl = e.currentTarget as HTMLElement;
+    const rect = gridEl.getBoundingClientRect();
+    const clickedPane = getPaneAtPixel(e.clientX - rect.left, e.clientY - rect.top);
+    if (clickedPane !== null && clickedPane !== activePaneId) {
+      resetScrollState();
+      activePaneId = clickedPane;
+      invoke("event_bus_emit", {
+        event_type: EventType.PaneFocused,
+        payload: JSON.stringify({ paneId: clickedPane }),
+      }).catch(console.error);
+    }
+  }
 
   // Ctrl+Click (or Cmd+Click on macOS) opens URLs
   if (e.ctrlKey || e.metaKey) {
@@ -241,6 +355,7 @@ async function createTab(): Promise<void> {
     const info: PtyInfo = await ptyClient.create({ rows: 24, cols: 80 });
     tabCounter++;
     tabBar.addTab(info.pane_id, `shell ${tabCounter}`);
+    resetScrollState();
     activePaneId = info.pane_id;
     statusBar.setDimensions(info.rows, info.cols);
     statusBar.setCwd("~");
@@ -316,6 +431,21 @@ function handleEvent(event: BusEvent): void {
       fetchCellSize().catch((e) => console.error("Failed to fetch cell size on RendererReady:", e));
       break;
     }
+    case EventType.ExtensionMessage: {
+      const p = decodePayload<{ source?: string; type?: string; payload?: Record<string, unknown> }>(event);
+      if (!p) break;
+      // Search overlay events
+      if (p.type === "OverlayShow" && p.payload?.overlay === "search") {
+        searchBar.show();
+      } else if (p.type === "OverlayHide" && p.payload?.overlay === "search") {
+        searchBar.hide();
+      } else if (p.type === "OverlayHighlights" && p.source === "search") {
+        const total = (p.payload?.total as number) ?? 0;
+        const current = (p.payload?.current as number) ?? 0;
+        searchBar.setMatchInfo(total, current);
+      }
+      break;
+    }
   }
 }
 
@@ -359,14 +489,6 @@ function buildKeySequence(e: KeyboardEvent): string {
  * shared with the Deno-side encoder lib/io/vt.ts). Vite resolves the import
  * at build time — no Deno-specific APIs are used in the keymap module.
  */
-import {
-  CSI_TILDE_KEYS,
-  CSI_LETTER_KEYS,
-  SS3_FUNCTION_KEYS,
-  CTRL_SPECIAL,
-  computeXtermModifier,
-} from "../../../lib/io/vt-keymap";
-
 const enc = new TextEncoder();
 
 function encodeKeyForPty(e: KeyboardEvent): Uint8Array | null {
@@ -439,6 +561,9 @@ function encodeKeyForPty(e: KeyboardEvent): Uint8Array | null {
  */
 async function handleKeyInput(e: KeyboardEvent): Promise<void> {
   if (activePaneId === null) return;
+
+  // When the search bar is focused, don't forward keystrokes to the PTY
+  if (searchBar.isVisible()) return;
 
   // Skip modifier-only key presses
   if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") return;
@@ -538,6 +663,7 @@ function handleResizeImpl(): void {
       console.error("Failed to resize PTY:", e);
     });
     statusBar.setDimensions(rows, cols);
+    updateLayoutRects();
 
     // Notify renderer of new surface size
     invoke("renderer_resize", {
@@ -572,15 +698,18 @@ function teardown(): void {
 window.addEventListener("DOMContentLoaded", async () => {
   const tabBarEl = document.getElementById("tab-bar")!;
   const statusBarEl = document.getElementById("status-bar")!;
+  const searchBarEl = document.getElementById("search-bar-container")!;
 
   tabBar = new TabBar(tabBarEl);
   statusBar = new StatusBar(statusBarEl);
+  searchBar = new SearchBar(searchBarEl);
 
   // Wire tab bar custom events
   tabBarEl.addEventListener("tab-new", () => createTab());
   tabBarEl.addEventListener("tab-select", ((e: CustomEvent) => {
     const id = e.detail.id as number;
     tabBar.setActiveTab(id);
+    resetScrollState();
     activePaneId = id;
   }) as EventListener);
   tabBarEl.addEventListener("tab-close", ((e: CustomEvent) => {
@@ -598,6 +727,7 @@ window.addEventListener("DOMContentLoaded", async () => {
       EventType.GridResized,
       EventType.GridUpdated,
       EventType.RendererReady,
+      EventType.ExtensionMessage,
     ],
     handleEvent
   );

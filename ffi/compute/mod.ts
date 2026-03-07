@@ -4,7 +4,7 @@
  * Wraps the C ABI exported by `libmarauder_compute` in an ergonomic TypeScript class.
  */
 
-import { resolve } from "jsr:@std/path@^1.0.0";
+import { resolveLibPath } from "../_lib.ts";
 
 /** A search match result. */
 export interface SearchMatch {
@@ -53,28 +53,7 @@ export interface GpuCell {
   col: number;
 }
 
-function findLibPath(): string {
-  const envDir = Deno.env.get("MARAUDER_LIB_DIR");
-  const ext = Deno.build.os === "darwin" ? "dylib" : Deno.build.os === "windows" ? "dll" : "so";
-  const name = `libmarauder_compute.${ext}`;
-
-  if (envDir) {
-    return resolve(envDir, name);
-  }
-  // Try release first, then debug
-  for (const profile of ["release", "debug"]) {
-    const path = resolve("target", profile, name);
-    try {
-      Deno.statSync(path);
-      return path;
-    } catch {
-      // continue
-    }
-  }
-  return resolve("target", "debug", name);
-}
-
-const lib = Deno.dlopen(findLibPath(), {
+const lib = Deno.dlopen(resolveLibPath("marauder_compute"), {
   compute_create: {
     parameters: [],
     result: "pointer",
@@ -146,6 +125,11 @@ function isInternalError(written: number | bigint): boolean {
   return written === 0xFFFFFFFE;
 }
 
+/** Convert a usize FFI result (number | bigint) to a number. */
+function usizeToNumber(value: number | bigint): number {
+  return typeof value === "bigint" ? Number(value) : value;
+}
+
 /**
  * TypeScript wrapper around the marauder GPU compute engine.
  */
@@ -182,7 +166,7 @@ export class ComputeEngine {
     const result = lib.symbols.compute_upload_cells(
       this.#handle,
       json,
-      json.byteLength,
+      BigInt(json.byteLength),
       rows,
       cols,
     );
@@ -209,9 +193,9 @@ export class ComputeEngine {
       const written = lib.symbols.compute_search(
         this.#handle,
         patternBytes,
-        patternBytes.byteLength,
+        BigInt(patternBytes.byteLength),
         outBuf,
-        outBuf.byteLength,
+        BigInt(outBuf.byteLength),
       );
       if (isBufferTooSmall(written)) {
         this.#growBuf();
@@ -220,8 +204,9 @@ export class ComputeEngine {
       if (isInternalError(written)) {
         throw new Error("ComputeEngine.search: internal error (check logs)");
       }
-      if (written === 0) return [];
-      return JSON.parse(decoder.decode(outBuf.subarray(0, written as number)));
+      const n = usizeToNumber(written);
+      if (n === 0) return [];
+      return JSON.parse(decoder.decode(outBuf.subarray(0, n)));
     }
   }
 
@@ -235,7 +220,7 @@ export class ComputeEngine {
         startRow,
         endRow,
         outBuf,
-        outBuf.byteLength,
+        BigInt(outBuf.byteLength),
       );
       if (isBufferTooSmall(written)) {
         this.#growBuf();
@@ -244,9 +229,10 @@ export class ComputeEngine {
       if (isInternalError(written)) {
         throw new Error("ComputeEngine.detectUrls: internal error (check logs)");
       }
-      if (written === 0) return [];
+      const n = usizeToNumber(written);
+      if (n === 0) return [];
       const raw: Array<{ row: number; start_col: number; end_col: number }> =
-        JSON.parse(decoder.decode(outBuf.subarray(0, written as number)));
+        JSON.parse(decoder.decode(outBuf.subarray(0, n)));
       return raw.map((m) => ({
         row: m.row,
         startCol: m.start_col,
@@ -263,7 +249,7 @@ export class ComputeEngine {
       const written = lib.symbols.compute_highlight_cells(
         this.#handle,
         outBuf,
-        outBuf.byteLength,
+        BigInt(outBuf.byteLength),
       );
       if (isBufferTooSmall(written)) {
         this.#growBuf();
@@ -272,8 +258,9 @@ export class ComputeEngine {
       if (isInternalError(written)) {
         throw new Error("ComputeEngine.highlightCells: internal error (check logs)");
       }
-      if (written === 0) return [];
-      return JSON.parse(decoder.decode(outBuf.subarray(0, written as number)));
+      const n = usizeToNumber(written);
+      if (n === 0) return [];
+      return JSON.parse(decoder.decode(outBuf.subarray(0, n)));
     }
   }
 
@@ -289,7 +276,7 @@ export class ComputeEngine {
         end.row,
         end.col,
         outBuf,
-        outBuf.byteLength,
+        BigInt(outBuf.byteLength),
       );
       if (isBufferTooSmall(written)) {
         this.#growBuf();
@@ -298,8 +285,9 @@ export class ComputeEngine {
       if (isInternalError(written)) {
         throw new Error("ComputeEngine.extractSelection: internal error (check logs)");
       }
-      if (written === 0) return "";
-      return decoder.decode(outBuf.subarray(0, written as number));
+      const n = usizeToNumber(written);
+      if (n === 0) return "";
+      return decoder.decode(outBuf.subarray(0, n));
     }
   }
 

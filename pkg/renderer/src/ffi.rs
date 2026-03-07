@@ -420,6 +420,132 @@ pub unsafe extern "C" fn renderer_free_queue_ptr(ptr: *const c_void) {
 }
 
 // ---------------------------------------------------------------------------
+// Pane borders
+// ---------------------------------------------------------------------------
+
+/// Set pane border quads. `borders_json` is a JSON array of `PaneBorder` objects.
+///
+/// Each border is rendered as a colored quad between the selection and cursor passes.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `renderer_create`.
+/// - `borders_json` must point to `borders_json_len` valid bytes.
+#[no_mangle]
+pub unsafe extern "C" fn renderer_set_pane_borders(
+    handle: *mut RendererHandle,
+    borders_json: *const u8,
+    borders_json_len: usize,
+) -> i32 {
+    if handle.is_null() || borders_json.is_null() || borders_json_len == 0 {
+        // Empty borders = clear
+        if !handle.is_null() && (borders_json.is_null() || borders_json_len == 0) {
+            let h = &*handle;
+            let mut r = lock_or_err!(h, mutable);
+            r.set_pane_borders(Vec::new());
+            return 0;
+        }
+        return -1;
+    }
+    let h = &*handle;
+    let slice = std::slice::from_raw_parts(borders_json, borders_json_len);
+    let borders: Vec<crate::renderer::PaneBorder> = match serde_json::from_slice(slice) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("renderer_set_pane_borders: bad JSON: {e}");
+            return -1;
+        }
+    };
+    let mut r = lock_or_err!(h, mutable);
+    r.set_pane_borders(borders);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Smooth scrolling
+// ---------------------------------------------------------------------------
+
+/// Set the subpixel vertical scroll offset (in pixels) for smooth scrolling.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `renderer_create`.
+#[no_mangle]
+pub unsafe extern "C" fn renderer_set_scroll_offset(
+    handle: *mut RendererHandle,
+    offset: f32,
+) -> i32 {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = &*handle;
+    let mut r = lock_or_err!(h, mutable);
+    r.set_scroll_offset(offset);
+    0
+}
+
+/// Get the current subpixel scroll offset.
+///
+/// Returns the offset as f32, or -1.0 on error.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `renderer_create`.
+#[no_mangle]
+pub unsafe extern "C" fn renderer_get_scroll_offset(
+    handle: *mut RendererHandle,
+) -> f32 {
+    if handle.is_null() {
+        return -1.0;
+    }
+    let h = &*handle;
+    match h.renderer.lock() {
+        Ok(r) => r.scroll_offset(),
+        Err(_) => -1.0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive frame rate
+// ---------------------------------------------------------------------------
+
+/// Mark recent activity to keep the renderer at active FPS.
+///
+/// Call on PTY output, key input, mouse events.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `renderer_create`.
+#[no_mangle]
+pub unsafe extern "C" fn renderer_mark_activity(
+    handle: *mut RendererHandle,
+) -> i32 {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = &*handle;
+    let mut r = lock_or_err!(h, mutable);
+    r.mark_activity();
+    0
+}
+
+/// Check whether enough time has elapsed to render a new frame.
+///
+/// Returns 1 if a frame should be rendered, 0 if not, -1 on error.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `renderer_create`.
+#[no_mangle]
+pub unsafe extern "C" fn renderer_should_render(
+    handle: *mut RendererHandle,
+) -> i32 {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = &*handle;
+    match h.renderer.lock() {
+        Ok(r) => if r.should_render() { 1 } else { 0 },
+        Err(_) => -1,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Overlay management
 // ---------------------------------------------------------------------------
 

@@ -85,6 +85,53 @@ fn renderer_get_cell_size(
     }
 }
 
+/// Tauri command: set pane border quads for split pane dividers.
+#[tauri::command]
+fn renderer_set_pane_borders(
+    state: tauri::State<'_, SharedRenderer>,
+    borders: Vec<marauder_renderer::PaneBorder>,
+) -> Result<(), String> {
+    let mut rend = state.lock().unwrap_or_else(|e| e.into_inner());
+    match rend.as_mut() {
+        Some(r) => {
+            r.set_pane_borders(borders);
+            Ok(())
+        }
+        None => Err("Renderer not initialized".into()),
+    }
+}
+
+/// Tauri command: set subpixel scroll offset for smooth scrolling.
+#[tauri::command]
+fn renderer_set_scroll_offset(
+    state: tauri::State<'_, SharedRenderer>,
+    offset: f32,
+) -> Result<(), String> {
+    let mut rend = state.lock().unwrap_or_else(|e| e.into_inner());
+    match rend.as_mut() {
+        Some(r) => {
+            r.set_scroll_offset(offset);
+            Ok(())
+        }
+        None => Err("Renderer not initialized".into()),
+    }
+}
+
+/// Tauri command: mark renderer activity for adaptive frame rate.
+#[tauri::command]
+fn renderer_mark_activity(
+    state: tauri::State<'_, SharedRenderer>,
+) -> Result<(), String> {
+    let mut rend = state.lock().unwrap_or_else(|e| e.into_inner());
+    match rend.as_mut() {
+        Some(r) => {
+            r.mark_activity();
+            Ok(())
+        }
+        None => Err("Renderer not initialized".into()),
+    }
+}
+
 /// Tauri command: notify the renderer of a window resize.
 #[tauri::command]
 fn renderer_resize(
@@ -357,7 +404,14 @@ pub fn run() {
                     let (render_tx, render_rx) = std::sync::mpsc::sync_channel::<()>(4);
 
                     let render_tx_event = render_tx.clone();
+                    let renderer_for_activity = Arc::clone(&renderer_for_thread);
                     event_bus_for_thread.subscribe(EventType::GridUpdated, move |_: &Event| {
+                        // Mark activity on PTY output for adaptive frame rate
+                        if let Ok(mut rend) = renderer_for_activity.lock() {
+                            if let Some(ref mut r) = *rend {
+                                r.mark_activity();
+                            }
+                        }
                         let _ = render_tx_event.try_send(());
                     });
 
@@ -500,6 +554,9 @@ pub fn run() {
             event_bridge::event_bus_unsubscribe_channel,
             renderer_get_cell_size,
             renderer_resize,
+            renderer_set_pane_borders,
+            renderer_set_scroll_offset,
+            renderer_mark_activity,
             marauder_pty::commands::pty_cmd_create,
             marauder_pty::commands::pty_cmd_write,
             marauder_pty::commands::pty_cmd_read,
