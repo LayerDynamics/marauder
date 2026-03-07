@@ -20,3 +20,4 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 pollster = "0.4"
 tokio = { workspace = true }
+naga = { version = "24.0", features = ["wgsl-in"] }

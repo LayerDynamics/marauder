@@ -72,6 +72,33 @@ pub struct Renderer {
 
     /// Registered overlay layers, keyed by layer ID.
     overlays: HashMap<u32, OverlayConfig>,
+
+    /// Pane border quads to render between selection and cursor passes.
+    pane_borders: Vec<PaneBorder>,
+    pane_border_instance_buffer: wgpu::Buffer,
+    pane_border_instance_count: u32,
+
+    /// Subpixel vertical scroll offset in pixels for smooth scrolling.
+    scroll_y_offset: f32,
+
+    /// Last time activity was detected (PTY output, key input, mouse event).
+    last_activity: Instant,
+    /// Last time a frame was rendered.
+    last_frame: Instant,
+
+    /// Custom overlay render pipelines compiled from extension-provided WGSL shaders.
+    overlay_pipelines: HashMap<u32, wgpu::RenderPipeline>,
+}
+
+/// A pane divider border rendered as a colored quad.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[repr(C)]
+pub struct PaneBorder {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: [f32; 4],
 }
 
 /// Configuration for an overlay layer (search highlights, selection, extension UI).
@@ -81,6 +108,10 @@ pub struct OverlayConfig {
     pub layer_id: u32,
     /// Whether this overlay is currently visible.
     pub visible: bool,
+    /// Whether this overlay comes from a trusted source (required for custom shaders).
+    /// Only overlays with `trusted: true` may include `shader_wgsl` in their data.
+    #[serde(default)]
+    pub trusted: bool,
     /// Overlay-specific configuration (JSON pass-through for extensibility).
     #[serde(default)]
     pub data: serde_json::Value,
@@ -236,10 +267,11 @@ impl Renderer {
                 let cell = &row_cells[col];
 
                 let px = col as f32 * cw;
-                let py = row as f32 * ch;
+                let py = row as f32 * ch - self.scroll_y_offset;
 
-                // Background
-                let bg_color = cell.bg.to_rgba_f32_or(default_bg);
+                // Background (apply opacity to alpha channel)
+                let mut bg_color = cell.bg.to_rgba_f32_or(default_bg);
+                bg_color[3] *= self.config.opacity;
                 bg_instances.push(BgInstance {
                     pos: [px, py],
                     size: [cw, ch],
@@ -285,7 +317,7 @@ impl Renderer {
                         break;
                     }
                     selection_instances.push(SelectionInstance {
-                        pos: [c as f32 * cw, r as f32 * ch],
+                        pos: [c as f32 * cw, r as f32 * ch - self.scroll_y_offset],
                         size: [cw, ch],
                         color: sel_color,
                     });
@@ -395,7 +427,7 @@ impl Renderer {
             ],
             cursor_pos: [
                 cursor_col as f32 * cw,
-                cursor_row as f32 * ch + cursor_y_offset,
+                cursor_row as f32 * ch + cursor_y_offset - self.scroll_y_offset,
             ],
             cursor_size: [cursor_w, cursor_h],
             cursor_color: self.config.theme.cursor,
@@ -524,7 +556,7 @@ impl Renderer {
                             r: self.config.theme.background[0] as f64,
                             g: self.config.theme.background[1] as f64,
                             b: self.config.theme.background[2] as f64,
-                            a: self.config.theme.background[3] as f64,
+                            a: (self.config.theme.background[3] * self.config.opacity) as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -555,6 +587,24 @@ impl Renderer {
                 pass.draw(0..6, 0..self.selection_instance_count);
             }
 
+            // Pane borders (reuse selection pipeline — same vertex layout)
+            if self.pane_border_instance_count > 0 {
+                pass.set_pipeline(&rp.selection_pipeline);
+                pass.set_bind_group(0, &rp.uniform_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.pane_border_instance_buffer.slice(..));
+                pass.draw(0..6, 0..self.pane_border_instance_count);
+            }
+
+            // Custom overlay pipelines (extension-provided shaders)
+            for (layer_id, pipeline) in &self.overlay_pipelines {
+                if let Some(overlay) = self.overlays.values().find(|o| o.layer_id == *layer_id && o.visible) {
+                    let _ = overlay; // overlay config available for future bind group data
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &rp.uniform_bind_group, &[]);
+                    pass.draw(0..6, 0..1);
+                }
+            }
+
             if self.cursor_visible {
                 pass.set_pipeline(&rp.cursor_pipeline);
                 pass.set_bind_group(0, &rp.cursor_bind_group, &[]);
@@ -564,6 +614,7 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        self.mark_frame_rendered();
 
         Ok(())
     }
@@ -574,15 +625,26 @@ impl Renderer {
     }
 
     /// Register an overlay layer. Replaces any existing overlay with the same ID.
+    /// If `config.data["shader_wgsl"]` contains a string, compiles a custom render pipeline.
     pub fn add_overlay(&mut self, config: OverlayConfig) {
-        tracing::debug!(layer_id = config.layer_id, "overlay added");
-        self.overlays.insert(config.layer_id, config);
+        let layer_id = config.layer_id;
+        // Compile custom shader pipeline only from trusted sources
+        if let Some(wgsl) = config.data.get("shader_wgsl").and_then(|v| v.as_str()) {
+            if !config.trusted {
+                tracing::warn!(layer_id, "Ignoring shader_wgsl from untrusted overlay source");
+            } else if let Err(e) = self.add_overlay_pipeline(layer_id, wgsl) {
+                tracing::warn!(layer_id, error = %e, "Failed to compile overlay shader, registering without pipeline");
+            }
+        }
+        tracing::debug!(layer_id, "overlay added");
+        self.overlays.insert(layer_id, config);
     }
 
     /// Remove an overlay layer by ID. Returns true if it existed.
     pub fn remove_overlay(&mut self, layer_id: u32) -> bool {
         let removed = self.overlays.remove(&layer_id).is_some();
         if removed {
+            self.overlay_pipelines.remove(&layer_id);
             tracing::debug!(layer_id, "overlay removed");
         }
         removed
@@ -591,6 +653,126 @@ impl Renderer {
     /// Get a reference to the registered overlays.
     pub fn overlays(&self) -> &HashMap<u32, OverlayConfig> {
         &self.overlays
+    }
+
+    /// Set pane border quads for split pane dividers.
+    /// Borders are rendered as colored quads (reusing the selection pipeline).
+    pub fn set_pane_borders(&mut self, borders: Vec<PaneBorder>) {
+        let instances: Vec<SelectionInstance> = borders
+            .iter()
+            .map(|b| SelectionInstance {
+                pos: [b.x, b.y],
+                size: [b.width, b.height],
+                color: b.color,
+            })
+            .collect();
+
+        // Grow buffer if needed
+        let required_size = (instances.len().max(1) * std::mem::size_of::<SelectionInstance>()) as u64;
+        if required_size > self.pane_border_instance_buffer.size() {
+            self.pane_border_instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pane_border_instance_buffer"),
+                size: required_size * 2,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+
+        if !instances.is_empty() {
+            self.queue.write_buffer(
+                &self.pane_border_instance_buffer,
+                0,
+                bytemuck::cast_slice(&instances),
+            );
+        }
+        self.pane_border_instance_count = instances.len() as u32;
+        self.pane_borders = borders;
+        tracing::debug!(count = self.pane_border_instance_count, "pane borders updated");
+    }
+
+    // -----------------------------------------------------------------------
+    // Smooth scrolling
+    // -----------------------------------------------------------------------
+
+    /// Set the subpixel vertical scroll offset (in pixels).
+    /// Used for smooth scrolling — the fractional part between grid lines.
+    pub fn set_scroll_offset(&mut self, offset: f32) {
+        self.scroll_y_offset = if offset.is_finite() {
+            offset.clamp(-4096.0, 4096.0)
+        } else {
+            0.0
+        };
+    }
+
+    /// Get the current subpixel scroll offset.
+    pub fn scroll_offset(&self) -> f32 {
+        self.scroll_y_offset
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive frame rate
+    // -----------------------------------------------------------------------
+
+    /// Mark recent activity (PTY output, key input, mouse event).
+    /// Resets the idle timer so the renderer uses `active_fps`.
+    pub fn mark_activity(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
+    /// Check whether enough time has elapsed since the last frame to render again.
+    /// Returns `true` if a frame should be rendered based on the current FPS target.
+    pub fn should_render(&self) -> bool {
+        let idle_threshold = std::time::Duration::from_secs(self.config.idle_threshold_secs);
+        let fps = if self.last_activity.elapsed() < idle_threshold {
+            self.config.active_fps
+        } else {
+            self.config.idle_fps
+        };
+        let frame_interval = std::time::Duration::from_secs_f64(1.0 / fps.max(1) as f64);
+        self.last_frame.elapsed() >= frame_interval
+    }
+
+    /// Record that a frame was just rendered (call after present).
+    pub fn mark_frame_rendered(&mut self) {
+        self.last_frame = Instant::now();
+    }
+
+    // -----------------------------------------------------------------------
+    // Opacity
+    // -----------------------------------------------------------------------
+
+    /// Set background opacity (0.0 = fully transparent, 1.0 = fully opaque).
+    pub fn set_opacity(&mut self, opacity: f32) {
+        self.config.opacity = opacity.clamp(0.0, 1.0);
+    }
+
+    /// Get the current background opacity.
+    pub fn opacity(&self) -> f32 {
+        self.config.opacity
+    }
+
+    // -----------------------------------------------------------------------
+    // Overlay shader pipelines
+    // -----------------------------------------------------------------------
+
+    /// Compile and register a custom overlay render pipeline from WGSL source.
+    /// Associates it with the given `layer_id`. Requires a surface (pipelines need a format).
+    pub fn add_overlay_pipeline(&mut self, layer_id: u32, wgsl_source: &str) -> Result<(), String> {
+        let rp = self.render.as_ref().ok_or("No render pipelines (headless mode)")?;
+        let pipeline = pipelines::create_overlay_pipeline(
+            &self.device,
+            self.surface_config.format,
+            wgsl_source,
+            &rp.text_bind_group_layout,
+        ).map_err(|e| format!("Failed to compile overlay pipeline: {e}"))?;
+        self.overlay_pipelines.insert(layer_id, pipeline);
+        tracing::debug!(layer_id, "Custom overlay pipeline compiled");
+        Ok(())
+    }
+
+    /// Remove a custom overlay pipeline by layer ID.
+    pub fn remove_overlay_pipeline(&mut self, layer_id: u32) -> bool {
+        self.overlay_pipelines.remove(&layer_id).is_some()
     }
 
     /// Create a headless renderer (no window surface) for FFI / config queries.
@@ -864,6 +1046,14 @@ impl Renderer {
             None
         };
 
+        let pane_border_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pane_border_instance_buffer"),
+            size: (64 * std::mem::size_of::<SelectionInstance>()) as u64, // reuse SelectionInstance layout
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let now = Instant::now();
         Ok(Self {
             device,
             queue,
@@ -882,10 +1072,17 @@ impl Renderer {
             bg_instance_count: 0,
             text_instance_count: 0,
             selection_instance_count: 0,
-            start_time: Instant::now(),
+            start_time: now,
             max_cells,
             cursor_visible: true,
             overlays: HashMap::new(),
+            pane_borders: Vec::new(),
+            pane_border_instance_buffer,
+            pane_border_instance_count: 0,
+            scroll_y_offset: 0.0,
+            last_activity: now,
+            last_frame: now,
+            overlay_pipelines: HashMap::new(),
         })
     }
 }

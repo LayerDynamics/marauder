@@ -3,6 +3,16 @@
 
 import type { ExtensionContext } from "@marauder/extensions";
 
+/** Check if a filesystem path exists. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 interface CwdChangedPayload {
   cwd: string;
   paneId?: string;
@@ -13,6 +23,8 @@ interface GitStatus {
   dirty: number;
   ahead: number;
   behind: number;
+  stash: number;
+  state: string;
 }
 
 /** Run a subprocess and return its stdout as a trimmed string.
@@ -50,25 +62,58 @@ function parseAheadBehind(output: string): { ahead: number; behind: number } {
 }
 
 async function fetchGitStatus(cwd: string): Promise<GitStatus | null> {
+  // Canonicalize cwd to prevent path traversal via unsanitized event payloads.
+  let resolvedCwd: string;
+  try {
+    resolvedCwd = await Deno.realPath(cwd);
+  } catch {
+    return null; // Path doesn't exist or is inaccessible.
+  }
+
   // Verify this is actually a git repo before running further commands.
-  const rootCheck = await runGit(["rev-parse", "--git-dir"], cwd);
+  const rootCheck = await runGit(["rev-parse", "--git-dir"], resolvedCwd);
   if (rootCheck === null) return null;
 
-  const branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+  // Run independent git queries in parallel.
+  const [branchResult, porcelainOutput, abOutput, stashOutput] = await Promise.all([
+    runGit(["rev-parse", "--abbrev-ref", "HEAD"], resolvedCwd),
+    runGit(["status", "--porcelain"], resolvedCwd),
+    runGit(["rev-list", "--count", "--left-right", "@{u}...HEAD"], resolvedCwd),
+    runGit(["stash", "list"], resolvedCwd),
+  ]);
+
+  const branch = branchResult;
   if (branch === null) return null;
 
-  const porcelainOutput = await runGit(["status", "--porcelain"], cwd);
   const dirty = porcelainOutput !== null ? parsePorcelain(porcelainOutput) : 0;
-
-  const abOutput = await runGit(
-    ["rev-list", "--count", "--left-right", "@{u}...HEAD"],
-    cwd,
-  );
   const { ahead, behind } = abOutput !== null
     ? parseAheadBehind(abOutput)
     : { ahead: 0, behind: 0 };
+  const stash = stashOutput !== null && stashOutput.length > 0
+    ? stashOutput.split("\n").filter((l) => l.trim().length > 0).length
+    : 0;
 
-  return { branch, dirty, ahead, behind };
+  // Repo state detection (rebase, merge, cherry-pick)
+  // Reuse rootCheck from the initial rev-parse --git-dir call.
+  let state = "";
+  {
+    let absGitDir: string;
+    try {
+      const rawPath = rootCheck.startsWith("/") ? rootCheck : `${resolvedCwd}/${rootCheck}`;
+      absGitDir = await Deno.realPath(rawPath);
+    } catch {
+      return { branch, dirty, ahead, behind, stash, state: "" };
+    }
+    if (await exists(`${absGitDir}/rebase-merge`) || await exists(`${absGitDir}/rebase-apply`)) {
+      state = "rebasing";
+    } else if (await exists(`${absGitDir}/MERGE_HEAD`)) {
+      state = "merging";
+    } else if (await exists(`${absGitDir}/CHERRY_PICK_HEAD`)) {
+      state = "cherry-picking";
+    }
+  }
+
+  return { branch, dirty, ahead, behind, stash, state };
 }
 
 const _unsubscribers: Array<() => void> = [];

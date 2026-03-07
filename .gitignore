@@ -4,7 +4,8 @@ target/
 
 # Node/Deno
 node_modules/
-dist/
+/dist/*
+!/dist/homebrew/
 
 # OS
 .DS_Store
@@ -19,3 +20,4 @@ Thumbs.db
 # Environment
 .env
 .env.*
+.feature-research

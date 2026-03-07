@@ -100,6 +100,14 @@ pub struct RendererConfig {
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub theme: ThemeColors,
+    /// Target FPS when idle (no recent activity). Default 10.
+    pub idle_fps: u32,
+    /// Target FPS when active (recent PTY output, input, mouse). Default 120.
+    pub active_fps: u32,
+    /// Background opacity (0.0 = fully transparent, 1.0 = fully opaque). Default 1.0.
+    pub opacity: f32,
+    /// Seconds of inactivity before switching from active_fps to idle_fps. Default 2.
+    pub idle_threshold_secs: u64,
 }
 
 impl Default for RendererConfig {
@@ -111,6 +119,10 @@ impl Default for RendererConfig {
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             theme: ThemeColors::default(),
+            idle_fps: 10,
+            active_fps: 120,
+            opacity: 1.0,
+            idle_threshold_secs: 2,
         }
     }
 }

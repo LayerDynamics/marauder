@@ -243,6 +243,136 @@ impl GlyphAtlas {
         Some(entry)
     }
 
+    /// Look up or rasterize a ligature (multi-character glyph sequence).
+    ///
+    /// Uses cosmic-text shaping to detect ligatures. Returns `None` if the font
+    /// does not provide a ligature for the given character sequence, or if the
+    /// sequence is empty.
+    pub fn get_or_insert_ligature(&mut self, chars: &[char]) -> Option<GlyphEntry> {
+        if chars.is_empty() {
+            return None;
+        }
+        // Single chars delegate to the standard path
+        if chars.len() == 1 {
+            return self.get_or_insert(chars[0]);
+        }
+
+        // Build a combined string key for cache lookup
+        let key_str: String = chars.iter().collect();
+
+        // For now, rasterize the combined string as a single glyph via cosmic-text shaping.
+        // cosmic-text's Advanced shaping will produce ligature glyphs if the font supports them.
+        let metrics = Metrics::new(self.font_size, self.cell_height);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        let family = Self::parse_family(&self.font_family);
+        let attrs = Attrs::new().family(family);
+        buffer.set_text(&mut self.font_system, &key_str, attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        // Check if shaping produced fewer glyphs than chars (i.e., a ligature was applied)
+        let mut glyph_count = 0usize;
+        for run in buffer.layout_runs() {
+            glyph_count += run.glyphs.len();
+            break; // first run only
+        }
+
+        if glyph_count == 0 || glyph_count >= chars.len() {
+            // No ligature detected — font rendered each char individually
+            return None;
+        }
+
+        // Ligature detected — rasterize the shaped ligature glyph from the buffer
+        tracing::trace!(ligature = %key_str, glyphs = glyph_count, "Ligature detected");
+
+        let mut glyph_width = 0u32;
+        let mut glyph_height = 0u32;
+        let mut glyph_pixels: Vec<u8> = Vec::new();
+        let mut glyph_left = 0i32;
+        let mut glyph_top = 0i32;
+
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let physical = glyph.physical((0.0, 0.0), 1.0);
+                if let Some(image) = self.swash_cache.get_image(&mut self.font_system, physical.cache_key) {
+                    glyph_width = image.placement.width;
+                    glyph_height = image.placement.height;
+                    glyph_left = image.placement.left;
+                    glyph_top = image.placement.top;
+
+                    match image.content {
+                        cosmic_text::SwashContent::Mask => {
+                            glyph_pixels = image.data.clone();
+                        }
+                        cosmic_text::SwashContent::Color => {
+                            glyph_pixels = image.data.chunks(4)
+                                .map(|px| px.get(3).copied().unwrap_or(0))
+                                .collect();
+                        }
+                        cosmic_text::SwashContent::SubpixelMask => {
+                            glyph_pixels = image.data.chunks(3)
+                                .map(|px| {
+                                    let r = px.first().copied().unwrap_or(0) as u16;
+                                    let g = px.get(1).copied().unwrap_or(0) as u16;
+                                    let b = px.get(2).copied().unwrap_or(0) as u16;
+                                    ((r + g + b) / 3) as u8
+                                })
+                                .collect();
+                        }
+                    }
+                    break; // Take the ligature glyph
+                }
+            }
+            break; // First run only
+        }
+
+        if glyph_width == 0 || glyph_height == 0 {
+            return None;
+        }
+
+        // Pack into atlas
+        if self.pack_x + glyph_width > ATLAS_SIZE {
+            self.pack_x = 0;
+            self.pack_y += self.row_height;
+            self.row_height = 0;
+        }
+        if self.pack_y + glyph_height > ATLAS_SIZE {
+            tracing::warn!("Glyph atlas full, cannot pack ligature '{}'", key_str);
+            return None;
+        }
+
+        for row in 0..glyph_height {
+            let src_offset = (row * glyph_width) as usize;
+            let dst_offset = ((self.pack_y + row) * ATLAS_SIZE + self.pack_x) as usize;
+            let width = glyph_width as usize;
+            if src_offset + width <= glyph_pixels.len()
+                && dst_offset + width <= self.pixels.len()
+            {
+                self.pixels[dst_offset..dst_offset + width]
+                    .copy_from_slice(&glyph_pixels[src_offset..src_offset + width]);
+            }
+        }
+
+        let atlas_size_f = ATLAS_SIZE as f32;
+        let entry = GlyphEntry {
+            uv: [
+                self.pack_x as f32 / atlas_size_f,
+                self.pack_y as f32 / atlas_size_f,
+                glyph_width as f32 / atlas_size_f,
+                glyph_height as f32 / atlas_size_f,
+            ],
+            pixel_size: [glyph_width as f32, glyph_height as f32],
+            offset: [glyph_left as f32, -glyph_top as f32],
+        };
+
+        self.pack_x += glyph_width + 1;
+        self.row_height = self.row_height.max(glyph_height + 1);
+        // Cache under the first char — ligature lookups will re-detect via shaping
+        self.entries.insert(chars[0], entry);
+        self.dirty = true;
+
+        Some(entry)
+    }
+
     /// Pre-warm the atlas with ASCII printable characters.
     pub fn prewarm_ascii(&mut self) {
         for c in 0x20u8..=0x7Eu8 {

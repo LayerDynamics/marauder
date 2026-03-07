@@ -101,6 +101,41 @@ export class ActionDispatcher {
         return true;
       }
 
+      case "split-pane-horizontal": {
+        const activeTab = this.#tabManager.getActiveTab();
+        if (activeTab) {
+          this.#tabManager.splitPane(activeTab.id, "horizontal");
+        }
+        return true;
+      }
+
+      case "split-pane-vertical": {
+        const activeTab = this.#tabManager.getActiveTab();
+        if (activeTab) {
+          this.#tabManager.splitPane(activeTab.id, "vertical");
+        }
+        return true;
+      }
+
+      case "focus-pane-left":
+      case "focus-pane-right":
+      case "focus-pane-up":
+      case "focus-pane-down": {
+        const tab = this.#tabManager.getActiveTab();
+        if (tab && tab.activePane !== null) {
+          const layout = this.#tabManager.getLayout(tab.id);
+          if (layout) {
+            const dir = action.replace("focus-pane-", "") as "left" | "right" | "up" | "down";
+            // Use a default viewport size; the frontend will provide actual dimensions
+            const adjacent = layout.getAdjacentPane(tab.activePane, dir, 1920, 1080);
+            if (adjacent !== null) {
+              this.#paneManager.focusPane(adjacent);
+            }
+          }
+        }
+        return true;
+      }
+
       case "close-pane": {
         if (context.paneId !== undefined) {
           await this.#paneManager.closePane(context.paneId);
