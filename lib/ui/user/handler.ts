@@ -130,6 +130,11 @@ export class ActionDispatcher {
         return true;
       }
 
+      // Prompt navigation — scroll grid viewport to previous/next prompt
+      case "jump-prev-prompt":
+      case "jump-next-prompt":
+      // History search — opens overlay via event bus
+      case "history-search":
       // UI chrome actions — dispatch via event bus for the webview to handle.
       // These are first-class keybinding actions (not extension passthrough).
       case "command-palette":
