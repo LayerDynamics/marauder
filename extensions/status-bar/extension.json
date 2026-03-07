@@ -2,5 +2,10 @@
   "name": "status-bar",
   "version": "0.1.0",
   "description": "Status bar segments showing cwd, branch, and pane info",
-  "entry": "mod.ts"
+  "entry": "mod.ts",
+  "permissions": ["statusBar:write"],
+  "dependencies": {
+    "git-integration": ">=0.1.0"
+  },
+  "activationEvents": ["*"]
 }

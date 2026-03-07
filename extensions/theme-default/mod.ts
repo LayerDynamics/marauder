@@ -1,40 +1,7 @@
 // extensions/theme-default/mod.ts
 // Catppuccin theme palettes for Marauder.
 
-interface ExtensionConfig {
-  get<T>(key: string): T | undefined;
-  set(key: string, value: unknown): void;
-}
-
-interface ExtensionEvents {
-  on(type: string, handler: (payload: unknown) => void): () => void;
-  emit(type: string, payload: unknown): void;
-}
-
-interface ExtensionStatusBar {
-  set(segment: "left" | "center" | "right", text: string): void;
-}
-
-interface ExtensionNotifications {
-  show(title: string, body?: string): void;
-}
-
-interface ExtensionCommands {
-  register(id: string, handler: () => void): void;
-}
-
-interface ExtensionKeybindings {
-  register(keys: string, commandId: string): void;
-}
-
-interface ExtensionContext {
-  config: ExtensionConfig;
-  events: ExtensionEvents;
-  statusBar: ExtensionStatusBar;
-  notifications: ExtensionNotifications;
-  commands: ExtensionCommands;
-  keybindings: ExtensionKeybindings;
-}
+import type { ExtensionContext } from "@marauder/extensions";
 
 /** RGBA tuple: [r, g, b, a] */
 type Rgba = [number, number, number, number];

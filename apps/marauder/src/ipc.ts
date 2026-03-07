@@ -318,3 +318,70 @@ export class RuntimeClient {
     // No cleanup needed — runtime is app-lifetime
   }
 }
+
+/** Message received from the extension bridge. */
+export interface ExtensionBridgeMessage {
+  kind: "extension-message" | "panel-event";
+  extensionName?: string;
+  type: string;
+  data: unknown;
+}
+
+/** Client for extension bridge commands — extension <-> webview communication. */
+export class ExtensionBridgeClient {
+  private bridgeChannel?: Channel<string>;
+
+  /**
+   * Start listening for extension bridge messages.
+   * The callback receives parsed ExtensionBridgeMessage objects.
+   */
+  async startBridge(
+    callback: (msg: ExtensionBridgeMessage) => void,
+  ): Promise<void> {
+    const channel = new Channel<string>();
+    channel.onmessage = (json: string) => {
+      try {
+        const msg: ExtensionBridgeMessage = JSON.parse(json);
+        callback(msg);
+      } catch (e) {
+        console.error("ExtensionBridgeClient: failed to parse message", e);
+      }
+    };
+    this.bridgeChannel = channel;
+    await invoke("extension_start_bridge", { channel });
+  }
+
+  /** Post a message from the webview to an extension. */
+  async postMessage(
+    extensionName: string,
+    type: string,
+    data: unknown,
+  ): Promise<void> {
+    await invoke("extension_post_message", {
+      extension_name: extensionName,
+      message_type: type,
+      data: JSON.stringify(data),
+    });
+  }
+
+  /** Register an extension panel in the webview. */
+  async registerPanel(config: {
+    id: string;
+    title: string;
+    html: string;
+    extensionName: string;
+  }): Promise<void> {
+    await invoke("extension_register_panel", { config });
+  }
+
+  /** List loaded extensions. */
+  async listExtensions(): Promise<
+    Array<{ name: string; version: string; state: string }>
+  > {
+    return invoke("extension_list", {});
+  }
+
+  [Symbol.dispose](): void {
+    this.bridgeChannel = undefined;
+  }
+}

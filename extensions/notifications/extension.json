@@ -2,5 +2,7 @@
   "name": "notifications",
   "version": "0.1.0",
   "description": "Desktop notifications for long-running commands",
-  "entry": "mod.ts"
+  "entry": "mod.ts",
+  "permissions": ["notifications:show"],
+  "activationEvents": ["*"]
 }

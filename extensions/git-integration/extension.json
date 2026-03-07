@@ -2,5 +2,7 @@
   "name": "git-integration",
   "version": "0.1.0",
   "description": "Git branch and status display",
-  "entry": "mod.ts"
+  "entry": "mod.ts",
+  "permissions": ["subprocess:git"],
+  "activationEvents": ["*"]
 }

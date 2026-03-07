@@ -21,6 +21,58 @@ type SharedRenderer = Arc<Mutex<Option<Renderer>>>;
 /// Currently focused pane's grid, swapped on PaneFocused events.
 type ActiveGrid = Arc<Mutex<Option<SharedGrid>>>;
 
+/// Shared extension bridge channel for extension <-> webview communication.
+type ExtensionBridgeChannel = Arc<Mutex<Option<tauri::ipc::Channel<String>>>>;
+
+/// Tauri command: start the extension bridge channel.
+#[tauri::command]
+fn extension_start_bridge(
+    state: tauri::State<'_, ExtensionBridgeChannel>,
+    channel: tauri::ipc::Channel<String>,
+) -> Result<(), String> {
+    let mut bridge = state.lock().unwrap_or_else(|e| e.into_inner());
+    *bridge = Some(channel);
+    tracing::info!("Extension bridge channel started");
+    Ok(())
+}
+
+/// Tauri command: post a message from the webview to an extension via the event bus.
+#[tauri::command]
+fn extension_post_message(
+    event_bus: tauri::State<'_, bus::SharedEventBus>,
+    extension_name: String,
+    message_type: String,
+    data: String,
+) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "source": "webview",
+        "target": extension_name,
+        "type": message_type,
+        "payload": data,
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    let event = Event::new(EventType::ExtensionMessage, bytes);
+    event_bus.publish(event);
+    Ok(())
+}
+
+/// Tauri command: register an extension panel (placeholder — actual panel management is in Deno).
+#[tauri::command]
+fn extension_register_panel(
+    config: serde_json::Value,
+) -> Result<(), String> {
+    tracing::info!(config = %config, "Extension panel registered");
+    Ok(())
+}
+
+/// Tauri command: list loaded extensions (delegates to Deno runtime).
+#[tauri::command]
+fn extension_list() -> Result<Vec<serde_json::Value>, String> {
+    // Placeholder — the real list comes from the Deno-side ExtensionRegistry.
+    // This command exists so the webview can query extension state.
+    Ok(vec![])
+}
+
 /// Tauri command: get the renderer's cell size (width, height) in pixels.
 #[tauri::command]
 fn renderer_get_cell_size(
@@ -69,6 +121,7 @@ pub fn run() {
     let active_grid: ActiveGrid = Arc::new(Mutex::new(None));
     let pane_grids: PaneGridMap = Arc::new(Mutex::new(HashMap::new()));
     let shared_renderer: SharedRenderer = Arc::new(Mutex::new(None));
+    let extension_bridge: ExtensionBridgeChannel = Arc::new(Mutex::new(None));
 
     let active_grid_for_setup = active_grid.clone();
     let pane_grids_for_setup = pane_grids.clone();
@@ -110,6 +163,7 @@ pub fn run() {
         .manage(TauriRuntimeHandle::new(shared_runtime))
         .manage(ipc_bridge::DenoBridge { tx: deno_tx })
         .manage(Mutex::new(Option::<event_bridge::TauriBridge>::None))
+        .manage(extension_bridge)
         .setup(move |app| {
             let window = app.get_webview_window("main")
                 .expect("main window not found");
@@ -475,6 +529,10 @@ pub fn run() {
             ipc_bridge::deno_eval,
             ipc_bridge::deno_call_op,
             ipc_bridge::resolve_keybinding,
+            extension_start_bridge,
+            extension_post_message,
+            extension_register_panel,
+            extension_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -15,7 +15,8 @@
     "@marauder/ui": "./lib/ui/mod.ts",
     "@marauder/io": "./lib/io/mod.ts",
     "@marauder/dev": "./lib/dev/mod.ts",
-    "@marauder/config": "./lib/config/mod.ts"
+    "@marauder/config": "./lib/config/mod.ts",
+    "@marauder/extensions": "./lib/extensions/mod.ts"
   },
   "tasks": {
     "dev": "deno run --allow-all --unstable-ffi lib/io/pipeline.ts",
@@ -29,6 +30,7 @@
     "lib/ui",
     "lib/io",
     "lib/dev",
+    "lib/extensions",
     "ffi/event-bus",
     "ffi/pty",
     "ffi/parser",
