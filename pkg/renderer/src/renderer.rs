@@ -422,9 +422,13 @@ impl Renderer {
         } else {
             0
         };
+        let idle_threshold = std::time::Duration::from_secs(self.config.idle_threshold_secs);
+        let is_active = self.last_activity.elapsed() < idle_threshold;
+        let target_fps = if is_active { self.config.active_fps } else { self.config.idle_fps };
         let stats_text = format!(
-            "FPS:{} Frame:{:.1}ms BG:{} Text:{} Ovl:{} Atlas:{:.0}% VRAM:{:.1}MB",
+            "FPS:{}/{} Frame:{:.1}ms BG:{} Text:{} Ovl:{} Atlas:{:.0}% VRAM:{:.1}MB",
             fps,
+            target_fps,
             self.frame_stats.frame_time_ms,
             self.frame_stats.bg_instances,
             self.frame_stats.text_instances,
@@ -608,9 +612,17 @@ impl Renderer {
                         };
 
                         if let Some(glyph) = glyph_opt {
+                            // CJK wide chars (width=2): scale glyph to span two cells
+                            let cell_span = cell.width.max(1) as f32;
+                            let glyph_size = if cell.width == 2 {
+                                [glyph.pixel_size[0].max(cw * cell_span), glyph.pixel_size[1]]
+                            } else {
+                                glyph.pixel_size
+                            };
+
                             let inst = TextInstance {
                                 pos: [px, py],
-                                size: glyph.pixel_size,
+                                size: glyph_size,
                                 fg_color,
                                 uv_rect: glyph.uv,
                                 glyph_offset: [glyph.offset[0], glyph.offset[1] + ascent],
@@ -623,7 +635,7 @@ impl Renderer {
                                 overflow_text_instances.entry(glyph.page).or_default().push(inst);
                             }
                         }
-                        col += 1;
+                        col += cell.width.max(1) as usize;
                     }
                 } else {
                     col += 1;

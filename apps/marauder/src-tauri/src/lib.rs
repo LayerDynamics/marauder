@@ -198,6 +198,22 @@ fn renderer_mark_activity(
     }
 }
 
+/// Tauri command: toggle the frame profiler overlay on/off.
+#[tauri::command]
+fn renderer_toggle_profiler(
+    state: tauri::State<'_, SharedRenderer>,
+) -> Result<bool, String> {
+    let mut rend = state.lock().unwrap_or_else(|e| e.into_inner());
+    match rend.as_mut() {
+        Some(r) => {
+            let new_state = !r.profiler_enabled();
+            r.set_profiler_enabled(new_state);
+            Ok(new_state)
+        }
+        None => Err("Renderer not initialized".into()),
+    }
+}
+
 /// Tauri command: push URL overlay data from JS-side detection to the renderer.
 /// Accepts an array of {row, start_col, end_col} objects and converts them to
 /// compute overlay instances (underline mode) for the next frame.
@@ -714,6 +730,7 @@ pub fn run() {
             renderer_set_pane_borders,
             renderer_set_scroll_offset,
             renderer_set_url_overlays,
+            renderer_toggle_profiler,
             renderer_mark_activity,
             marauder_pty::commands::pty_cmd_create,
             marauder_pty::commands::pty_cmd_write,

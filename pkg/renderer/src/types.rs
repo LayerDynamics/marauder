@@ -194,12 +194,38 @@ pub struct RendererConfig {
     pub opacity: f32,
     /// Seconds of inactivity before switching from active_fps to idle_fps. Default 2.
     pub idle_threshold_secs: u64,
-    /// Enable subpixel antialiasing for text rendering. Default false.
+    /// Enable subpixel antialiasing for text rendering.
+    /// Default: true on macOS, false elsewhere.
     pub subpixel_aa: bool,
+    /// OpenType font features to enable/disable.
+    /// Keys are feature tags (e.g. "liga", "calt", "dlig"), values are enabled state.
+    pub font_features: FontFeatures,
+}
+
+/// OpenType font feature toggles for ligatures and stylistic sets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FontFeatures {
+    /// Standard ligatures (fi, fl, etc.). Default true.
+    pub liga: bool,
+    /// Contextual alternates (font-dependent). Default true.
+    pub calt: bool,
+    /// Discretionary ligatures (decorative). Default false.
+    pub dlig: bool,
+}
+
+impl Default for FontFeatures {
+    fn default() -> Self {
+        Self {
+            liga: true,
+            calt: true,
+            dlig: false,
+        }
+    }
 }
 
 impl Default for RendererConfig {
     fn default() -> Self {
+        let subpixel_aa = cfg!(target_os = "macos");
         Self {
             font_family: "monospace".into(),
             font_size: 14.0,
@@ -211,7 +237,8 @@ impl Default for RendererConfig {
             active_fps: 120,
             opacity: 1.0,
             idle_threshold_secs: 2,
-            subpixel_aa: false,
+            subpixel_aa,
+            font_features: FontFeatures::default(),
         }
     }
 }

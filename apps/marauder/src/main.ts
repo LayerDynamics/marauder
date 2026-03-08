@@ -668,6 +668,12 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
     return;
   }
 
+  // Frame profiler toggle: Ctrl+Shift+P
+  if (e.ctrlKey && e.shiftKey && e.key === "P") {
+    invoke("renderer_toggle_profiler").catch(console.error);
+    return;
+  }
+
   // Scrollback navigation: Shift+PageUp/PageDown
   if (e.shiftKey && e.key === "PageUp") {
     gridClient.scrollViewportBy(paneId, 24).catch(console.error);
