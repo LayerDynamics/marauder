@@ -18,15 +18,18 @@ pub struct ComputeHandle {
 /// Caller must eventually call `compute_destroy` to free the handle.
 #[no_mangle]
 pub extern "C" fn compute_create() -> *mut ComputeHandle {
-    match ComputeEngine::new_standalone() {
-        Ok(engine) => Box::into_raw(Box::new(ComputeHandle {
-            engine: Mutex::new(engine),
-        })),
-        Err(e) => {
-            tracing::error!(error = %e, "compute_create: failed to create standalone engine");
-            std::ptr::null_mut()
+    let result = std::panic::catch_unwind(|| {
+        match ComputeEngine::new_standalone() {
+            Ok(engine) => Box::into_raw(Box::new(ComputeHandle {
+                engine: Mutex::new(engine),
+            })),
+            Err(e) => {
+                tracing::error!(error = %e, "compute_create: failed to create standalone engine");
+                std::ptr::null_mut()
+            }
         }
-    }
+    });
+    result.unwrap_or(std::ptr::null_mut())
 }
 
 /// Create a compute engine sharing the renderer's device and queue.
@@ -44,16 +47,19 @@ pub unsafe extern "C" fn compute_create_shared(
     if device_ptr.is_null() || queue_ptr.is_null() {
         return std::ptr::null_mut();
     }
-    // SAFETY: Caller guarantees pointers point to valid Arc<Device> / Arc<Queue> instances.
-    let engine = unsafe {
-        ComputeEngine::new_borrowed(
-            device_ptr as *const std::sync::Arc<wgpu::Device>,
-            queue_ptr as *const std::sync::Arc<wgpu::Queue>,
-        )
-    };
-    Box::into_raw(Box::new(ComputeHandle {
-        engine: Mutex::new(engine),
-    }))
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: Caller guarantees pointers point to valid Arc<Device> / Arc<Queue> instances.
+        let engine = unsafe {
+            ComputeEngine::new_borrowed(
+                device_ptr as *const std::sync::Arc<wgpu::Device>,
+                queue_ptr as *const std::sync::Arc<wgpu::Queue>,
+            )
+        };
+        Box::into_raw(Box::new(ComputeHandle {
+            engine: Mutex::new(engine),
+        }))
+    }));
+    result.unwrap_or(std::ptr::null_mut())
 }
 
 /// Upload cell data from a JSON array of GpuCell objects.
@@ -73,20 +79,23 @@ pub unsafe extern "C" fn compute_upload_cells(
     if handle.is_null() || json_ptr.is_null() {
         return 0;
     }
-    let handle = unsafe { &*handle };
-    let json = unsafe { std::slice::from_raw_parts(json_ptr, json_len) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let json = unsafe { std::slice::from_raw_parts(json_ptr, json_len) };
 
-    let cells: Vec<GpuCell> = match serde_json::from_slice(json) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "compute_upload_cells: JSON parse error");
-            return 0;
-        }
-    };
+        let cells: Vec<GpuCell> = match serde_json::from_slice(json) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_upload_cells: JSON parse error");
+                return 0;
+            }
+        };
 
-    let mut engine = lock_or_log(&handle.engine, "compute::ffi");
-    engine.upload_cells_raw(&cells, rows, cols);
-    1
+        let mut engine = lock_or_log(&handle.engine, "compute::ffi");
+        engine.upload_cells_raw(&cells, rows, cols);
+        1
+    }));
+    result.unwrap_or(0)
 }
 
 /// Upload cell data directly from a Grid handle.
@@ -103,12 +112,15 @@ pub unsafe extern "C" fn compute_upload_from_grid(
     if handle.is_null() || grid_handle.is_null() {
         return 0;
     }
-    let handle = unsafe { &*handle };
-    let grid_handle = unsafe { &*grid_handle };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let grid_handle = unsafe { &*grid_handle };
 
-    let mut engine = lock_or_log(&handle.engine, "compute::ffi");
-    grid_handle.with_grid(|grid| engine.upload_cells(grid));
-    1
+        let mut engine = lock_or_log(&handle.engine, "compute::ffi");
+        grid_handle.with_grid(|grid| engine.upload_cells(grid));
+        1
+    }));
+    result.unwrap_or(0)
 }
 
 /// Search for a pattern. Writes JSON results to `out_buf`. Returns bytes written, 0 on error.
@@ -128,23 +140,26 @@ pub unsafe extern "C" fn compute_search(
     if handle.is_null() || pattern_ptr.is_null() || out_buf.is_null() {
         return INTERNAL_ERROR;
     }
-    let handle = unsafe { &*handle };
-    let pattern_bytes = unsafe { std::slice::from_raw_parts(pattern_ptr, pattern_len) };
-    let pattern = match std::str::from_utf8(pattern_bytes) {
-        Ok(s) => s,
-        Err(_) => return INTERNAL_ERROR,
-    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let pattern_bytes = unsafe { std::slice::from_raw_parts(pattern_ptr, pattern_len) };
+        let pattern = match std::str::from_utf8(pattern_bytes) {
+            Ok(s) => s,
+            Err(_) => return INTERNAL_ERROR,
+        };
 
-    let engine = lock_or_log(&handle.engine, "compute::ffi");
-    let results = match engine.search(pattern) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "compute_search failed");
-            return INTERNAL_ERROR;
-        }
-    };
+        let mut engine = lock_or_log(&handle.engine, "compute::ffi");
+        let results = match engine.search(pattern) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_search failed");
+                return INTERNAL_ERROR;
+            }
+        };
 
-    write_json_to_buf(&results, out_buf, out_buf_len)
+        write_json_to_buf(&results, out_buf, out_buf_len)
+    }));
+    result.unwrap_or(INTERNAL_ERROR)
 }
 
 /// Detect URLs in row range. Writes JSON results to `out_buf`. Returns bytes written.
@@ -163,16 +178,19 @@ pub unsafe extern "C" fn compute_detect_urls(
     if handle.is_null() || out_buf.is_null() {
         return INTERNAL_ERROR;
     }
-    let handle = unsafe { &*handle };
-    let engine = lock_or_log(&handle.engine, "compute::ffi");
-    let results = match engine.detect_urls(row_start, row_end) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "compute_detect_urls failed");
-            return INTERNAL_ERROR;
-        }
-    };
-    write_json_to_buf(&results, out_buf, out_buf_len)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let engine = lock_or_log(&handle.engine, "compute::ffi");
+        let results = match engine.detect_urls(row_start, row_end) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_detect_urls failed");
+                return INTERNAL_ERROR;
+            }
+        };
+        write_json_to_buf(&results, out_buf, out_buf_len)
+    }));
+    result.unwrap_or(INTERNAL_ERROR)
 }
 
 /// Classify cells for highlighting. Writes JSON results to `out_buf`. Returns bytes written.
@@ -189,16 +207,19 @@ pub unsafe extern "C" fn compute_highlight_cells(
     if handle.is_null() || out_buf.is_null() {
         return INTERNAL_ERROR;
     }
-    let handle = unsafe { &*handle };
-    let engine = lock_or_log(&handle.engine, "compute::ffi");
-    let results = match engine.highlight_cells() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "compute_highlight_cells failed");
-            return INTERNAL_ERROR;
-        }
-    };
-    write_json_to_buf(&results, out_buf, out_buf_len)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let engine = lock_or_log(&handle.engine, "compute::ffi");
+        let results = match engine.highlight_cells(&[]) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_highlight_cells failed");
+                return INTERNAL_ERROR;
+            }
+        };
+        write_json_to_buf(&results, out_buf, out_buf_len)
+    }));
+    result.unwrap_or(INTERNAL_ERROR)
 }
 
 /// Extract selection text. Writes UTF-8 to `out_buf`. Returns bytes written.
@@ -219,28 +240,233 @@ pub unsafe extern "C" fn compute_extract_selection(
     if handle.is_null() || out_buf.is_null() {
         return INTERNAL_ERROR;
     }
-    let handle = unsafe { &*handle };
-    let engine = lock_or_log(&handle.engine, "compute::ffi");
-    let text = match engine.extract_selection(start_row, start_col, end_row, end_col) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(error = %e, "compute_extract_selection failed");
-            return INTERNAL_ERROR;
-        }
-    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let engine = lock_or_log(&handle.engine, "compute::ffi");
+        let text = match engine.extract_selection(start_row, start_col, end_row, end_col) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_extract_selection failed");
+                return INTERNAL_ERROR;
+            }
+        };
 
-    let bytes = text.as_bytes();
-    if bytes.len() > out_buf_len {
-        tracing::warn!(
-            needed = bytes.len(),
-            available = out_buf_len,
-            "compute_extract_selection: buffer too small, caller should retry"
-        );
-        return BUFFER_TOO_SMALL;
+        let bytes = text.as_bytes();
+        if bytes.len() > out_buf_len {
+            tracing::warn!(
+                needed = bytes.len(),
+                available = out_buf_len,
+                "compute_extract_selection: buffer too small, caller should retry"
+            );
+            return BUFFER_TOO_SMALL;
+        }
+        let out = unsafe { std::slice::from_raw_parts_mut(out_buf, bytes.len()) };
+        out.copy_from_slice(bytes);
+        bytes.len()
+    }));
+    result.unwrap_or(INTERNAL_ERROR)
+}
+
+/// Search using a GPU NFA regex. Writes JSON results to `out_buf`. Returns bytes written.
+///
+/// `pattern_ptr`/`pattern_len` is the regex pattern string (UTF-8).
+/// Returns `INTERNAL_ERROR` if the pattern cannot be compiled or if the GPU fails.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `compute_create`.
+/// - `pattern_ptr` must point to `pattern_len` valid UTF-8 bytes.
+/// - `out_buf` must point to `out_buf_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn compute_search_regex(
+    handle: *mut ComputeHandle,
+    pattern_ptr: *const u8,
+    pattern_len: usize,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+) -> usize {
+    if handle.is_null() || pattern_ptr.is_null() || out_buf.is_null() {
+        return INTERNAL_ERROR;
     }
-    let out = unsafe { std::slice::from_raw_parts_mut(out_buf, bytes.len()) };
-    out.copy_from_slice(bytes);
-    bytes.len()
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let pattern_bytes = unsafe { std::slice::from_raw_parts(pattern_ptr, pattern_len) };
+        let pattern = match std::str::from_utf8(pattern_bytes) {
+            Ok(s) => s,
+            Err(_) => return INTERNAL_ERROR,
+        };
+
+        let nfa = match crate::types::RegexNfa::compile(pattern) {
+            Some(nfa) => nfa,
+            None => {
+                tracing::warn!(pattern, "compute_search_regex: pattern not compilable to NFA");
+                return INTERNAL_ERROR;
+            }
+        };
+
+        let engine = lock_or_log(&handle.engine, "compute::ffi");
+        let results = match engine.search_regex(&nfa) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_search_regex failed");
+                return INTERNAL_ERROR;
+            }
+        };
+
+        write_json_to_buf(&results, out_buf, out_buf_len)
+    }));
+    result.unwrap_or(INTERNAL_ERROR)
+}
+
+/// Compute diff between two cell snapshots. Writes JSON results to `out_buf`.
+///
+/// `cells_a_json`/`cells_b_json` are JSON arrays of GpuCell objects.
+/// Returns bytes written, `INTERNAL_ERROR` on failure.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `compute_create`.
+/// - JSON pointers must be valid for their lengths.
+/// - `out_buf` must point to `out_buf_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn compute_diff(
+    handle: *mut ComputeHandle,
+    cells_a_json: *const u8,
+    cells_a_len: usize,
+    rows_a: u32,
+    cells_b_json: *const u8,
+    cells_b_len: usize,
+    rows_b: u32,
+    cols: u32,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+) -> usize {
+    if handle.is_null() || cells_a_json.is_null() || cells_b_json.is_null() || out_buf.is_null() {
+        return INTERNAL_ERROR;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        let json_a = unsafe { std::slice::from_raw_parts(cells_a_json, cells_a_len) };
+        let json_b = unsafe { std::slice::from_raw_parts(cells_b_json, cells_b_len) };
+
+        let cells_a: Vec<GpuCell> = match serde_json::from_slice(json_a) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_diff: cells_a JSON parse error");
+                return INTERNAL_ERROR;
+            }
+        };
+        let cells_b: Vec<GpuCell> = match serde_json::from_slice(json_b) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_diff: cells_b JSON parse error");
+                return INTERNAL_ERROR;
+            }
+        };
+
+        let engine = lock_or_log(&handle.engine, "compute::ffi");
+        let results = match engine.compute_diff(&cells_a, rows_a, &cells_b, rows_b, cols) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_diff failed");
+                return INTERNAL_ERROR;
+            }
+        };
+
+        write_json_to_buf(&results, out_buf, out_buf_len)
+    }));
+    result.unwrap_or(INTERNAL_ERROR)
+}
+
+/// Search scrollback cells for a pattern. Takes JSON cell array + pattern.
+/// Writes JSON results to `out_buf`. Returns bytes written.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `compute_create`.
+/// - `cells_json` must point to `cells_len` valid JSON bytes.
+/// - `pattern_ptr` must point to `pattern_len` valid UTF-8 bytes.
+/// - `out_buf` must point to `out_buf_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn compute_search_scrollback(
+    handle: *mut ComputeHandle,
+    cells_ptr: *const GpuCell,
+    cell_count: usize,
+    rows: u32,
+    cols: u32,
+    pattern_ptr: *const u8,
+    pattern_len: usize,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+) -> usize {
+    if handle.is_null() || cells_ptr.is_null() || pattern_ptr.is_null() || out_buf.is_null() {
+        return INTERNAL_ERROR;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+        // SAFETY: Caller guarantees cells_ptr points to cell_count valid GpuCell structs.
+        let cells = unsafe { std::slice::from_raw_parts(cells_ptr, cell_count) };
+        let pattern_bytes = unsafe { std::slice::from_raw_parts(pattern_ptr, pattern_len) };
+        let pattern = match std::str::from_utf8(pattern_bytes) {
+            Ok(s) => s,
+            Err(_) => return INTERNAL_ERROR,
+        };
+        let mut engine = lock_or_log(&handle.engine, "compute::ffi");
+        let results = match engine.search_scrollback_batched(cells, rows, cols, pattern) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_search_scrollback failed");
+                return INTERNAL_ERROR;
+            }
+        };
+        write_json_to_buf(&results, out_buf, out_buf_len)
+    }));
+    result.unwrap_or(INTERNAL_ERROR)
+}
+
+/// Classify cells for highlighting with custom rules.
+/// `rules_json`/`rules_len` is a JSON array of HighlightRule objects.
+/// Writes JSON results to `out_buf`. Returns bytes written.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `compute_create`.
+/// - `rules_json` must point to `rules_len` valid JSON bytes.
+/// - `out_buf` must point to `out_buf_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn compute_highlight_cells_with_rules(
+    handle: *mut ComputeHandle,
+    rules_json: *const u8,
+    rules_len: usize,
+    out_buf: *mut u8,
+    out_buf_len: usize,
+) -> usize {
+    if handle.is_null() || out_buf.is_null() {
+        return INTERNAL_ERROR;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = unsafe { &*handle };
+
+        let rules: Vec<crate::types::HighlightRule> = if rules_json.is_null() || rules_len == 0 {
+            Vec::new()
+        } else {
+            let json = unsafe { std::slice::from_raw_parts(rules_json, rules_len) };
+            match serde_json::from_slice(json) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "compute_highlight_cells_with_rules: rules JSON parse error");
+                    Vec::new()
+                }
+            }
+        };
+
+        let engine = lock_or_log(&handle.engine, "compute::ffi");
+        let results = match engine.highlight_cells(&rules) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_highlight_cells_with_rules failed");
+                return INTERNAL_ERROR;
+            }
+        };
+        write_json_to_buf(&results, out_buf, out_buf_len)
+    }));
+    result.unwrap_or(INTERNAL_ERROR)
 }
 
 /// Destroy a compute handle, freeing its memory.
@@ -251,8 +477,11 @@ pub unsafe extern "C" fn compute_extract_selection(
 #[no_mangle]
 pub unsafe extern "C" fn compute_destroy(handle: *mut ComputeHandle) {
     if !handle.is_null() {
-        // SAFETY: handle is valid and not previously freed per caller contract
-        let _ = unsafe { Box::from_raw(handle) };
+        // SAFETY: handle is valid and not previously freed per caller contract.
+        // Catch panics from Drop impls to prevent UB at FFI boundary.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = unsafe { Box::from_raw(handle) };
+        }));
     }
 }
 

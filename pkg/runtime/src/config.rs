@@ -29,7 +29,9 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         let shell = resolve_default_shell();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let cwd = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
         Self {
             shell,
             env: HashMap::new(),

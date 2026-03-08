@@ -63,15 +63,22 @@ export function findUrlAtCell(
   return null;
 }
 
+/** Pluggable opener — set by the app layer to use Tauri's plugin-opener. */
+let _openFn: ((url: string) => Promise<void>) | null = null;
+
+/** Register a custom URL opener (call from the Tauri app entry point). */
+export function setUrlOpener(fn: (url: string) => Promise<void>): void {
+  _openFn = fn;
+}
+
 /**
  * Open a URL in the system default browser.
- * Uses Tauri's opener plugin if available, falls back to window.open.
+ * Uses the registered opener if available, falls back to window.open.
  */
 export async function openUrl(url: string): Promise<void> {
-  try {
-    const { open } = await import("@tauri-apps/plugin-opener");
-    await open(url);
-  } catch {
+  if (_openFn) {
+    await _openFn(url);
+  } else {
     window.open(url, "_blank");
   }
 }

@@ -17,36 +17,15 @@ const WEBVIEW_ALLOWED_EMIT_TYPES: &[EventType] = &[
     EventType::ExtensionMessage,
 ];
 
-/// Event types forwarded to the webview. Excludes hot-path events
-/// (PtyOutput, ParserAction, RenderFrame*) that fire at extreme rates.
-const BRIDGE_EVENT_TYPES: &[EventType] = &[
-    EventType::KeyInput,
-    EventType::MouseInput,
-    EventType::PasteInput,
-    EventType::PtyExit,
-    EventType::PtyError,
-    EventType::GridResized,
-    EventType::GridScrolled,
-    EventType::SelectionChanged,
-    EventType::ShellPromptDetected,
-    EventType::ShellCommandStarted,
-    EventType::ShellCommandFinished,
-    EventType::ShellCwdChanged,
-    EventType::OverlayChanged,
-    EventType::ConfigChanged,
-    EventType::ConfigError,
-    EventType::SessionCreated,
-    EventType::SessionClosed,
-    EventType::PaneCreated,
-    EventType::PaneClosed,
-    EventType::PaneFocused,
-    EventType::TabCreated,
-    EventType::TabClosed,
-    EventType::TabFocused,
-    EventType::ExtensionLoaded,
-    EventType::ExtensionUnloaded,
-    EventType::ExtensionMessage,
-];
+/// Returns all non-hot-path event types for webview forwarding.
+/// Derived from `EventType::all()` filtered by `is_hot_path()`, so adding
+/// new variants to the enum automatically includes them here.
+fn bridge_event_types() -> Vec<EventType> {
+    EventType::all()
+        .into_iter()
+        .filter(|et| !et.is_hot_path())
+        .collect()
+}
 
 /// Bridges the event bus to the Tauri webview via Channel streaming.
 /// Only forwards non-hot-path events to avoid overwhelming the webview IPC.
@@ -60,7 +39,8 @@ impl TauriBridge {
     pub fn new(bus: SharedEventBus, channel: Channel<String>) -> Self {
         let mut subscriber_ids = Vec::new();
 
-        for &event_type in BRIDGE_EVENT_TYPES {
+        let bridge_types = bridge_event_types();
+        for &event_type in &bridge_types {
             let channel = channel.clone();
             let id = bus.subscribe(event_type, move |event: &Event| {
                 match serde_json::to_string(event) {
@@ -158,7 +138,7 @@ pub fn event_bus_start_bridge(
         return Err("Event bridge already started".to_string());
     }
     *slot = Some(TauriBridge::new((*state).clone(), channel));
-    tracing::info!("TauriBridge started — forwarding {} event types to webview", BRIDGE_EVENT_TYPES.len());
+    tracing::info!("TauriBridge started — forwarding {} event types to webview", bridge_event_types().len());
     Ok(())
 }
 

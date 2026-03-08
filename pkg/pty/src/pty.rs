@@ -31,6 +31,8 @@ pub fn open_pty(config: &PtyConfig) -> anyhow::Result<OpenPtyResult> {
     let pair = pty_system.openpty(size)?;
 
     let mut cmd = CommandBuilder::new(&config.shell);
+    // Launch as login shell so .zshrc / .bash_profile / oh-my-zsh loads
+    cmd.arg("-l");
     for (key, val) in &config.env {
         cmd.env(key, val);
     }
@@ -83,7 +85,9 @@ pub fn default_config(rows: u16, cols: u16) -> PtyConfig {
     PtyConfig {
         shell: default_shell(),
         env: std::collections::HashMap::new(),
-        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        cwd: std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))),
         rows,
         cols,
     }

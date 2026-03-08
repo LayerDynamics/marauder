@@ -2,7 +2,8 @@
 
 use wgpu;
 
-use crate::types::{BgInstance, SelectionInstance, TextInstance};
+use crate::images::ImageInstance;
+use crate::types::{BgInstance, ComputeOverlayInstance, SelectionInstance, TextInstance};
 
 /// Maximum allowed WGSL source size (64 KiB).
 const MAX_WGSL_SIZE: usize = 64 * 1024;
@@ -241,6 +242,157 @@ pub fn create_text_pipeline(
     })
 }
 
+/// Create the subpixel text render pipeline (uses RGBA atlas for per-subpixel coverage).
+pub fn create_subpixel_text_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    text_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("text_subpixel_shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../../resources/shaders/text_subpixel.wgsl").into()),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("text_subpixel_pipeline_layout"),
+        bind_group_layouts: &[text_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("text_subpixel_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<TextInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 2 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 48, shader_location: 4 },
+                ],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                // Subpixel AA requires per-channel blending:
+                // - Source RGB is premultiplied (fg_color * coverage), so use One.
+                // - Destination RGB is attenuated per-channel by (1 - coverage),
+                //   achieved via OneMinusSrc since src.rgb = fg * coverage.
+                //   We use OneMinusSrcColor so each R/G/B channel blends
+                //   independently by its own subpixel coverage value.
+                // - Alpha uses standard premultiplied blending.
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Create the compute overlay pipeline (search highlights, URL underlines, outlines).
+pub fn create_compute_overlay_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    uniform_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("compute_overlay_shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../../resources/shaders/overlay.wgsl").into()),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("compute_overlay_pipeline_layout"),
+        bind_group_layouts: &[uniform_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("compute_overlay_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<ComputeOverlayInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    // pos
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    // size
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                    // color
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 2,
+                    },
+                    // flags
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32,
+                        offset: 32,
+                        shader_location: 3,
+                    },
+                ],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 /// Create the selection overlay pipeline (alpha-blended instanced quads).
 pub fn create_selection_pipeline(
     device: &wgpu::Device,
@@ -282,6 +434,81 @@ pub fn create_selection_pipeline(
                         shader_location: 1,
                     },
                     // color
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 2,
+                    },
+                ],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Create the image render pipeline (inline images: Sixel, iTerm2).
+///
+/// Uses two bind group layouts:
+/// - group(0): uniform buffer (viewport size, etc.)
+/// - group(1): per-image texture + sampler (from `ImageManager::bind_group_layout()`)
+pub fn create_image_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    image_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("image_shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../../resources/shaders/image.wgsl").into()),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("image_pipeline_layout"),
+        bind_group_layouts: &[uniform_bind_group_layout, image_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("image_pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<ImageInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    // pos
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    // size
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                    // uv_rect
                     wgpu::VertexAttribute {
                         format: wgpu::VertexFormat::Float32x4,
                         offset: 16,

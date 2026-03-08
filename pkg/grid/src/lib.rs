@@ -1,4 +1,5 @@
 pub mod cell;
+pub mod scrollback;
 pub mod ffi;
 pub mod grid;
 pub mod screen;
@@ -13,6 +14,13 @@ pub use screen::{Screen, Row};
 
 /// Re-export the canonical PaneId from event-bus.
 pub use marauder_event_bus::PaneId;
+
+/// Errors from grid operations.
+#[derive(Debug, thiserror::Error)]
+pub enum GridError {
+    #[error("scrollback I/O error: {0}")]
+    ScrollbackIo(#[from] std::io::Error),
+}
 
 /// Shared grid handle for concurrent access.
 pub type SharedGrid = std::sync::Arc<std::sync::Mutex<Grid>>;

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 
 use unicode_width::UnicodeWidthChar;
@@ -239,7 +240,13 @@ impl Grid {
     /// When `viewport_offset == 0` (live view), this returns `screen.rows[row]`.
     /// When scrolled up, the top rows come from scrollback and the bottom rows
     /// from the active screen.
-    pub fn visible_row(&self, row: usize) -> Option<&[Cell]> {
+    /// Return the row of cells that should be displayed at a given visible row index,
+    /// accounting for `viewport_offset` into the scrollback buffer.
+    ///
+    /// When `viewport_offset == 0` (live view), this returns a borrowed slice from the
+    /// active screen. When scrolled up into scrollback, the row is deserialized from the
+    /// tiered scrollback and returned as an owned `Vec<Cell>` wrapped in `Cow::Owned`.
+    pub fn visible_row(&self, row: usize) -> Option<Cow<'_, [Cell]>> {
         let screen = self.active_screen();
         let total_rows = screen.rows.len();
         if row >= total_rows {
@@ -247,7 +254,7 @@ impl Grid {
         }
         let offset = self.viewport_offset;
         if offset == 0 {
-            return Some(&screen.rows[row]);
+            return Some(Cow::Borrowed(&screen.rows[row]));
         }
         // The scrollback is ordered oldest-first. With viewport_offset N,
         // we want to show the last N scrollback rows at the top of the viewport.
@@ -258,16 +265,37 @@ impl Grid {
         let scrollback_start = scrollback_len - visible_scrollback;
 
         if row < visible_scrollback {
-            // This row comes from scrollback
-            screen.scrollback_row(scrollback_start + row).map(|r| r.as_slice())
+            // This row comes from scrollback (owned, deserialized from tiered storage).
+            screen
+                .scrollback_row(scrollback_start + row)
+                .map(|r| Cow::Owned(r))
         } else {
-            // This row comes from the active screen
+            // This row comes from the active screen.
             let screen_row = row - visible_scrollback;
             if screen_row < total_rows {
-                Some(&screen.rows[screen_row])
+                Some(Cow::Borrowed(&screen.rows[screen_row]))
             } else {
                 None
             }
+        }
+    }
+
+    /// Fast-path row access for the live view (viewport_offset == 0).
+    ///
+    /// Returns a direct `&[Cell]` slice with no `Cow` indirection, avoiding
+    /// the discriminant branch on every cell access in the hot render path.
+    /// Returns `None` if scrolled into scrollback (caller must fall back to
+    /// `visible_row()` which handles scrollback deserialization).
+    #[inline]
+    pub fn visible_row_slice(&self, row: usize) -> Option<&[Cell]> {
+        if self.viewport_offset != 0 {
+            return None;
+        }
+        let screen = self.active_screen();
+        if row < screen.rows.len() {
+            Some(&screen.rows[row])
+        } else {
+            None
         }
     }
 
@@ -520,7 +548,8 @@ impl Grid {
             TerminalAction::OscDispatch { .. } | TerminalAction::DeviceStatusReport(_) |
             TerminalAction::SendDeviceAttributes | TerminalAction::CsiRaw { .. } |
             TerminalAction::EscRaw { .. } |
-            TerminalAction::SixelData { .. } | TerminalAction::ITermImage { .. } => {
+            TerminalAction::SixelData { .. } | TerminalAction::ITermImage { .. } |
+            TerminalAction::ParserError { .. } => {
                 // Queue for higher layers to drain via drain_pending_actions()
                 self.pending_actions.push(action.clone());
             }

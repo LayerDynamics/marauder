@@ -32,6 +32,9 @@ pub enum RuntimeError {
 
     #[error("invalid resize dimensions: {rows}x{cols}")]
     InvalidResize { rows: u16, cols: u16 },
+
+    #[error("renderer error: {0}")]
+    Renderer(#[from] marauder_renderer::RendererError),
 }
 
 impl RuntimeError {

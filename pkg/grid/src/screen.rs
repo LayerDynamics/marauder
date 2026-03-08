@@ -1,18 +1,13 @@
-use std::collections::VecDeque;
 use crate::cell::Cell;
+use crate::scrollback::TieredScrollback;
 
 pub type Row = Vec<Cell>;
-
-/// Default scrollback capacity (number of rows).
-const DEFAULT_SCROLLBACK_CAPACITY: usize = 10_000;
 
 pub struct Screen {
     pub rows: Vec<Row>,
     pub cols: usize,
-    /// Ring buffer of rows that have scrolled off the top.
-    scrollback: VecDeque<Row>,
-    /// Maximum number of scrollback rows to retain.
-    scrollback_capacity: usize,
+    /// Tiered scrollback buffer (hot/warm/cold).
+    scrollback: TieredScrollback,
 }
 
 impl Screen {
@@ -23,27 +18,24 @@ impl Screen {
         Self {
             rows: grid_rows,
             cols,
-            scrollback: VecDeque::new(),
-            scrollback_capacity: DEFAULT_SCROLLBACK_CAPACITY,
+            scrollback: TieredScrollback::new(cols),
         }
     }
 
-    /// Set the maximum scrollback capacity.
+    /// Set the maximum hot-tier capacity of the scrollback.
     pub fn set_scrollback_capacity(&mut self, capacity: usize) {
-        self.scrollback_capacity = capacity;
-        while self.scrollback.len() > self.scrollback_capacity {
-            self.scrollback.pop_front();
-        }
+        self.scrollback.set_hot_capacity(capacity);
     }
 
-    /// Number of rows currently in scrollback.
+    /// Number of rows currently in scrollback (across all tiers).
     pub fn scrollback_len(&self) -> usize {
-        self.scrollback.len()
+        self.scrollback.total_rows()
     }
 
-    /// Get a scrollback row (0 = oldest).
-    pub fn scrollback_row(&self, idx: usize) -> Option<&Row> {
-        self.scrollback.get(idx)
+    /// Get a scrollback row by absolute index (0 = oldest).
+    /// Returns an owned `Row`; warm/cold tiers deserialize on demand.
+    pub fn scrollback_row(&self, idx: usize) -> Option<Row> {
+        self.scrollback.get_row(idx)
     }
 
     /// Scroll the screen up by one line within the given region [top, bottom).
@@ -53,19 +45,16 @@ impl Screen {
         if top >= bottom || bottom > self.rows.len() {
             return;
         }
-        // If scrolling the entire screen (or from top), save to scrollback
+        // If scrolling the entire screen (or from top), save to scrollback.
         if top == 0 {
             let row = self.rows[0].clone();
-            self.scrollback.push_back(row);
-            if self.scrollback.len() > self.scrollback_capacity {
-                self.scrollback.pop_front();
-            }
+            self.scrollback.push_row(row);
         }
-        // Shift rows up within the region
+        // Shift rows up within the region.
         for i in top..bottom - 1 {
             self.rows.swap(i, i + 1);
         }
-        // Clear the bottom row
+        // Clear the bottom row.
         self.rows[bottom - 1] = vec![Cell::default(); self.cols];
     }
 
@@ -83,27 +72,25 @@ impl Screen {
 
     /// Resize the screen to new dimensions.
     pub fn resize(&mut self, new_rows: usize, new_cols: usize) {
-        // Adjust column widths
+        // Adjust column widths.
         if new_cols != self.cols {
             for row in &mut self.rows {
                 row.resize(new_cols, Cell::default());
             }
             self.cols = new_cols;
+            self.scrollback.set_cols(new_cols);
         }
-        // Adjust row count
+        // Adjust row count.
         if new_rows > self.rows.len() {
-            // Add rows at the bottom
+            // Add rows at the bottom.
             for _ in 0..(new_rows - self.rows.len()) {
                 self.rows.push(vec![Cell::default(); self.cols]);
             }
         } else if new_rows < self.rows.len() {
-            // Remove rows from the top, pushing them to scrollback
+            // Remove rows from the top, pushing them to scrollback.
             let excess = self.rows.len() - new_rows;
             for row in self.rows.drain(..excess) {
-                self.scrollback.push_back(row);
-                if self.scrollback.len() > self.scrollback_capacity {
-                    self.scrollback.pop_front();
-                }
+                self.scrollback.push_row(row);
             }
         }
     }

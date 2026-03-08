@@ -61,7 +61,9 @@ pub unsafe extern "C" fn pty_create(
     };
 
     let cwd = if cwd.is_null() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
     } else {
         PathBuf::from(
             unsafe { CStr::from_ptr(cwd) }

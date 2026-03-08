@@ -10,6 +10,7 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 wgpu = { workspace = true }
 cosmic-text = { workspace = true }
+marauder-compute = { path = "../compute" }
 marauder-event-bus = { path = "../event-bus" }
 marauder-grid = { path = "../grid" }
 raw-window-handle = { workspace = true }

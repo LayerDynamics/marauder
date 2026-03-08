@@ -1,5 +1,7 @@
 mod event_bridge;
 mod ipc_bridge;
+#[cfg(target_os = "macos")]
+mod metal_view;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -267,7 +269,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(event_bus.clone())
         .manage(webview_subs)
-        .manage(TauriPtyManager::new())
+        .manage(TauriPtyManager::new()) // Late-injected with runtime's PTY manager after boot
         .manage(active_grid.clone())
         .manage(shared_renderer)
         .manage(pane_grids.clone())
@@ -284,15 +286,52 @@ pub fn run() {
             let pane_grids_for_thread = pane_grids_for_setup.clone();
             let event_bus_for_thread = event_bus_for_setup.clone();
             let renderer_for_thread = renderer_for_setup.clone();
-            let window_arc = Arc::new(window.clone());
             let size = window.inner_size().unwrap_or(tauri::PhysicalSize::new(800, 600));
             let scale = window.scale_factor().unwrap_or(1.0) as f32;
+
+            // Init wgpu renderer on the MAIN thread (macOS Metal requires this).
+            // wgpu creates a CAMetalLayer on WryWebViewParent (the contentView).
+            // WKWebView renders as a subview on top. We fix its transparency after.
+            let renderer_config = RendererConfig::default();
+            let window_arc = Arc::new(window.clone());
+
+            match pollster::block_on(Renderer::new(
+                Arc::clone(&window_arc),
+                size.width,
+                size.height,
+                scale,
+                renderer_config,
+            )) {
+                Ok(mut renderer) => {
+                    tracing::info!("wgpu renderer initialized on main thread");
+                    // Offset grid below the tab bar (32 CSS px) so content isn't occluded.
+                    // Status bar (24 CSS px) is at the bottom — grid rows will naturally stop
+                    // before it since the grid element's clientHeight excludes it.
+                    let tab_bar_height = 32.0 * scale;
+                    renderer.set_grid_offset(0.0, tab_bar_height);
+                    *renderer_for_thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(renderer);
+
+                    // After wgpu sets CAMetalLayer on WryWebViewParent, ensure the
+                    // WKWebView subview is transparent so Metal content shows through.
+                    #[cfg(target_os = "macos")]
+                    unsafe { metal_view::ensure_webview_transparency(&window); }
+                    // Publish RendererReady so the webview makes the body transparent.
+                    event_bus_for_setup.publish(Event::new(EventType::RendererReady, 0u32));
+                    // Also emit directly to the Tauri webview so it arrives even if
+                    // the event bridge isn't connected yet.
+                    let _ = window.emit("marauder://renderer-ready", ());
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize wgpu renderer");
+                }
+            };
 
             let config_store_for_thread = config_store_for_setup.clone();
             let runtime_handle_for_thread = runtime_for_setup.clone();
 
             // Clone window for error reporting from the background thread
             let window_for_error = window.clone();
+            let app_handle = app.handle().clone();
 
             // Spawn everything on a dedicated thread with its own tokio runtime
             let mut deno_rx = deno_rx;
@@ -305,7 +344,7 @@ pub fn run() {
                 rt.block_on(async move {
                     // Boot runtime
                     let rt_config = RuntimeConfig::default();
-                    let mut runtime = MarauderRuntime::new(rt_config);
+                    let mut runtime = MarauderRuntime::with_event_bus(rt_config, event_bus_for_thread.clone());
 
                     if let Err(e) = runtime.boot().await {
                         tracing::error!(error = %e, "Failed to boot Marauder runtime");
@@ -343,6 +382,12 @@ pub fn run() {
                     {
                         let rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
                         config_store_for_thread.inject(rt.config_store().clone());
+
+                        // Inject the runtime's PTY manager into the Tauri command layer
+                        // so pty_cmd_write/read/etc. operate on the real PTY sessions.
+                        let tauri_pty: tauri::State<'_, TauriPtyManager> = app_handle.state();
+                        tauri_pty.inject(rt.pty_manager().clone());
+                        tracing::info!("Injected runtime PTY manager into Tauri command state");
                     }
 
                     // Listen for new panes to register their grids from the runtime pipeline
@@ -362,24 +407,8 @@ pub fn run() {
                         }
                     });
 
-                    // Init wgpu renderer
-                    let renderer_config = RendererConfig::default();
-                    match Renderer::new(
-                        window_arc,
-                        size.width,
-                        size.height,
-                        scale,
-                        renderer_config,
-                    ).await {
-                        Ok(renderer) => {
-                            tracing::info!("wgpu renderer initialized");
-                            *renderer_for_thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(renderer);
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to initialize wgpu renderer");
-                            return;
-                        }
-                    };
+                    // Renderer already initialized on the main thread (macOS Metal requirement).
+                    // The shared_renderer is populated before this thread was spawned.
 
                     // Initialize deno_core JsRuntime with all ops extensions
                     let mut js_runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
@@ -449,6 +478,19 @@ pub fn run() {
                         marauder_runtime::ops::mark_primary_attached(&mut state);
 
                         tracing::info!("Injected shared runtime state into JsRuntime OpState");
+
+                    // Log pipeline diagnostics for dev mode
+                    {
+                        let grid_updated_subs = event_bus_for_thread.subscriber_count(EventType::GridUpdated);
+                        let pty_output_subs = event_bus_for_thread.subscriber_count(EventType::PtyOutput);
+                        let pane_created_subs = event_bus_for_thread.subscriber_count(EventType::PaneCreated);
+                        tracing::info!(
+                            grid_updated_subs,
+                            pty_output_subs,
+                            pane_created_subs,
+                            "Pipeline diagnostics: event bus subscriber counts"
+                        );
+                    }
                     }
 
                     // Run bootstrap script to set up JS-side API surface
@@ -471,6 +513,7 @@ pub fn run() {
                     let render_tx_event = render_tx.clone();
                     let renderer_for_activity = Arc::clone(&renderer_for_thread);
                     event_bus_for_thread.subscribe(EventType::GridUpdated, move |_: &Event| {
+                        tracing::trace!("GridUpdated → signalling render thread");
                         // Mark activity on PTY output for adaptive frame rate
                         if let Ok(mut rend) = renderer_for_activity.lock() {
                             if let Some(ref mut r) = *rend {
@@ -515,10 +558,10 @@ pub fn run() {
                                     if let Some(ref mut renderer) = *rend {
                                         match renderer.render_frame(grid) {
                                             Ok(()) => {}
-                                            Err(wgpu::SurfaceError::Lost) => {
+                                            Err(marauder_renderer::RendererError::Surface(wgpu::SurfaceError::Lost)) => {
                                                 tracing::debug!("Surface lost, waiting for resize");
                                             }
-                                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                            Err(marauder_renderer::RendererError::Surface(wgpu::SurfaceError::OutOfMemory)) => {
                                                 tracing::error!("GPU out of memory");
                                                 break;
                                             }
@@ -538,7 +581,10 @@ pub fn run() {
                             result = js_runtime.run_event_loop(deno_core::PollEventLoopOptions::default()) => {
                                 match result {
                                     Ok(()) => {
-                                        tracing::debug!("JsRuntime event loop completed");
+                                        // The JsRuntime event loop returns immediately when idle.
+                                        // Sleep briefly to avoid a tight spin that starves other
+                                        // tokio tasks (pipeline processor, PTY reader, etc.).
+                                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                                     }
                                     Err(e) => {
                                         tracing::error!(error = %e, "JsRuntime event loop error");
@@ -573,18 +619,30 @@ pub fn run() {
                                         }
                                     }
                                     ipc_bridge::DenoRequest::CallOp { op_name, args, reply } => {
-                                        let args_js = args
-                                            .iter()
-                                            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".into()))
-                                            .collect::<Vec<_>>()
-                                            .join(", ");
-                                        let js = format!(
-                                            "JSON.stringify(Deno.core.ops.{}({}))",
-                                            op_name,
-                                            args_js
+                                        // Safety: op_name is validated by is_op_allowed() (alphanumeric + underscore
+                                        // only, must match a known prefix). Args are injected via a JSON-parsed
+                                        // global variable to prevent JS injection through crafted string values.
+                                        let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "[]".into());
+
+                                        // Set args via a global that is parsed from a JSON string literal,
+                                        // so no user-controlled content is interpolated into executable JS.
+                                        let setup_js = format!(
+                                            "globalThis.__callop_args = JSON.parse({});",
+                                            serde_json::to_string(&args_json).unwrap_or_else(|_| "\"[]\"".into()),
                                         );
+                                        let call_js = format!(
+                                            "JSON.stringify(Deno.core.ops.{}(...globalThis.__callop_args))",
+                                            op_name,
+                                        );
+
                                         let result = js_runtime
-                                            .execute_script("<call_op>", deno_core::FastString::from(js));
+                                            .execute_script("<call_op_setup>", deno_core::FastString::from(setup_js))
+                                            .and_then(|_| {
+                                                js_runtime.execute_script(
+                                                    "<call_op>",
+                                                    deno_core::FastString::from(call_js),
+                                                )
+                                            });
                                         let reply_result = match result {
                                             Ok(global) => {
                                                 deno_core::scope!(scope, js_runtime);
@@ -593,6 +651,11 @@ pub fn run() {
                                             }
                                             Err(e) => Err(e.to_string()),
                                         };
+                                        // Clean up the temporary global
+                                        let _ = js_runtime.execute_script(
+                                            "<call_op_cleanup>",
+                                            deno_core::FastString::from_static("delete globalThis.__callop_args;"),
+                                        );
                                         let _ = reply.send(reply_result);
                                     }
                                 }

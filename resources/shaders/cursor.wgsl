@@ -6,12 +6,14 @@ struct VertexOutput {
 
 struct CursorUniforms {
     viewport_size: vec2<f32>,
-    cursor_pos: vec2<f32>,   // pixel position of cursor cell
-    cursor_size: vec2<f32>,  // width, height of cursor
+    cursor_pos: vec2<f32>,
+    cursor_size: vec2<f32>,
+    _pad0: vec2<f32>,
     cursor_color: vec4<f32>,
     time: f32,
     blink_rate: f32,
-    _pad: vec2<f32>,
+    _pad1: vec2<f32>,
+    _pad2: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> cursor: CursorUniforms;
@@ -43,7 +45,10 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Blink: sin wave, visible when > 0
-    let blink = step(0.0, sin(cursor.time * cursor.blink_rate * 6.283185));
+    var blink = 1.0;
+    if (cursor.blink_rate > 0.0) {
+        blink = step(0.0, sin(cursor.time * cursor.blink_rate * 6.283185));
+        blink = max(blink, 0.3); // never fully invisible
+    }
     return vec4<f32>(cursor.cursor_color.rgb, cursor.cursor_color.a * blink);
 }

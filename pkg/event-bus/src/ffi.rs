@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::bus::{EventBus, SharedEventBus, SubscriberId};
 use crate::events::{Event, EventType};
@@ -49,7 +49,7 @@ pub unsafe extern "C" fn event_bus_subscribe(
         Err(_) => return 0,
     };
 
-    let user_data = UserDataWrapper { p: user_data };
+    let user_data = UserDataWrapper::new(user_data);
     let callback = CallbackWrapper { f: callback };
 
     let id = handle.bus.subscribe(event_type, move |event| {
@@ -175,7 +175,7 @@ pub unsafe extern "C" fn event_bus_intercept(
     }
     let handle = unsafe { &*handle };
 
-    let user_data = UserDataWrapper { p: user_data };
+    let user_data = UserDataWrapper::new(user_data);
     let callback = InterceptCallbackWrapper { f: callback };
 
     struct FfiInterceptor {
@@ -283,23 +283,43 @@ impl Clone for InterceptCallbackWrapper {
 }
 impl Copy for InterceptCallbackWrapper {}
 
-/// Wrapper to make *mut c_void Send+Sync.
-/// SAFETY: Caller ensures user_data is valid for the subscription lifetime.
+/// Thread-safe wrapper for FFI user data pointers.
+///
+/// Callbacks registered via `event_bus_subscribe` and `event_bus_intercept` may
+/// be invoked from any thread that publishes events. This wrapper serializes
+/// access to the raw pointer through a `Mutex` so that concurrent publishes do
+/// not race on the pointer value itself.
+///
+/// # Safety contract (caller must uphold)
+///
+/// 1. The memory pointed to by `user_data` must remain valid and dereferenceable
+///    for the entire lifetime of the subscription / interceptor (i.e. until
+///    `event_bus_unsubscribe` or `event_bus_destroy` is called).
+/// 2. If the C callback dereferences `user_data`, the pointed-to data must
+///    itself be safe to access from multiple threads concurrently (e.g.
+///    protected by a mutex on the C side, or inherently immutable).
+/// 3. If these invariants cannot be upheld, the caller must ensure that events
+///    are only published from a single thread.
+#[derive(Clone)]
 struct UserDataWrapper {
-    p: *mut c_void,
+    inner: Arc<Mutex<*mut c_void>>,
 }
+
+// SAFETY: The raw pointer is never dereferenced on the Rust side. Access is
+// serialized through the Mutex. The C caller is responsible for thread-safety
+// of the pointed-to data as documented above.
 unsafe impl Send for UserDataWrapper {}
 unsafe impl Sync for UserDataWrapper {}
 
 impl UserDataWrapper {
-    fn ptr(&self) -> *mut c_void {
-        self.p
+    fn new(p: *mut c_void) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(p)),
+        }
     }
-}
 
-impl Clone for UserDataWrapper {
-    fn clone(&self) -> Self {
-        Self { p: self.p }
+    /// Retrieve the raw pointer under the lock.
+    fn ptr(&self) -> *mut c_void {
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
-impl Copy for UserDataWrapper {}

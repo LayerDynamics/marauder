@@ -46,7 +46,7 @@ fn compute_bindgen_search(handle_id: u32, pattern: &str) -> String {
         Some(e) => e,
         None => return "[]".to_string(),
     };
-    let engine = lock_or_log(&engine, "compute::bindgen");
+    let mut engine = lock_or_log(&engine, "compute::bindgen");
     match engine.search(pattern) {
         Ok(results) => serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string()),
         Err(_) => "[]".to_string(),
@@ -75,7 +75,7 @@ fn compute_bindgen_highlight_cells(handle_id: u32) -> String {
         None => return "[]".to_string(),
     };
     let engine = lock_or_log(&engine, "compute::bindgen");
-    match engine.highlight_cells() {
+    match engine.highlight_cells(&[]) {
         Ok(results) => serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string()),
         Err(_) => "[]".to_string(),
     }
@@ -98,6 +98,39 @@ fn compute_bindgen_extract_selection(
     match engine.extract_selection(start_row, start_col, end_row, end_col) {
         Ok(text) => text,
         Err(_) => String::new(),
+    }
+}
+
+/// Classify cells for highlighting with custom rules JSON.
+#[deno_bindgen]
+fn compute_bindgen_highlight_cells_with_rules(handle_id: u32, rules_json: &str) -> String {
+    let engine = match get_engine(handle_id) {
+        Some(e) => e,
+        None => return "[]".to_string(),
+    };
+    let rules: Vec<crate::types::HighlightRule> = serde_json::from_str(rules_json).unwrap_or_default();
+    let engine = lock_or_log(&engine, "compute::bindgen");
+    match engine.highlight_cells(&rules) {
+        Ok(results) => serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string()),
+        Err(_) => "[]".to_string(),
+    }
+}
+
+/// Search scrollback cells for a pattern. Cells provided as JSON.
+#[deno_bindgen]
+fn compute_bindgen_search_scrollback(handle_id: u32, cells_json: &str, rows: u32, cols: u32, pattern: &str) -> String {
+    let engine = match get_engine(handle_id) {
+        Some(e) => e,
+        None => return "[]".to_string(),
+    };
+    let cells: Vec<GpuCell> = match serde_json::from_str(cells_json) {
+        Ok(c) => c,
+        Err(_) => return "[]".to_string(),
+    };
+    let mut engine = lock_or_log(&engine, "compute::bindgen");
+    match engine.search_scrollback_batched(&cells, rows, cols, pattern) {
+        Ok(results) => serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string()),
+        Err(_) => "[]".to_string(),
     }
 }
 

@@ -18,3 +18,4 @@ thiserror = { workspace = true }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 deno_bindgen = { workspace = true }
+deno_error = { workspace = true }

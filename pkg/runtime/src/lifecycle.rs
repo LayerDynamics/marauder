@@ -68,6 +68,23 @@ impl MarauderRuntime {
         }
     }
 
+    /// Create a new runtime with a shared event bus (for embedding in Tauri).
+    ///
+    /// This ensures the runtime publishes events to the same bus that the
+    /// renderer and other subsystems subscribe to.
+    pub fn with_event_bus(config: RuntimeConfig, event_bus: SharedEventBus) -> Self {
+        Self {
+            state: RuntimeState::Created,
+            config,
+            event_bus,
+            config_store: Arc::new(RwLock::new(ConfigStore::new())),
+            config_watcher: None,
+            pty_manager: Arc::new(Mutex::new(PtyManager::new())),
+            pipelines: HashMap::new(),
+            lifecycle_hooks: hooks::create_shared_hooks(),
+        }
+    }
+
     /// Boot the runtime: init event bus → config → PTY manager.
     ///
     /// This is the bootstrap sequence. After boot, the runtime is ready

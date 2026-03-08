@@ -229,8 +229,8 @@ pub unsafe extern "C" fn renderer_update_cells(
     let gh = &*grid_handle;
     let mut r = lock_or_err!(h, mutable);
     gh.with_grid(|grid| {
-        let (bg, text, sel, crow, ccol, cvis) = r.build_instances_from(grid);
-        r.upload_instances(&bg, &text, &sel, crow, ccol, cvis);
+        let (text, subpixel_text, sel, crow, ccol, cvis) = r.build_instances_from(grid);
+        r.upload_instances(&text, &subpixel_text, &sel, crow, ccol, cvis);
     });
     // Re-upload atlas if build_instances_from rasterized new glyphs
     r.flush_atlas_if_dirty();
@@ -256,11 +256,11 @@ pub unsafe extern "C" fn renderer_render_frame(handle: *mut RendererHandle) -> i
     }
     match r.submit_frame() {
         Ok(()) => 0,
-        Err(wgpu::SurfaceError::Lost) => {
+        Err(crate::RendererError::Surface(wgpu::SurfaceError::Lost)) => {
             tracing::warn!("renderer_render_frame: surface lost, reconfigure needed");
             -2
         }
-        Err(wgpu::SurfaceError::OutOfMemory) => {
+        Err(crate::RendererError::Surface(wgpu::SurfaceError::OutOfMemory)) => {
             tracing::error!("renderer_render_frame: out of GPU memory");
             -3
         }
@@ -597,6 +597,72 @@ pub unsafe extern "C" fn renderer_remove_overlay(
     let h = &*handle;
     let mut r = lock_or_err!(h, mutable);
     if r.remove_overlay(layer_id) {
+        0
+    } else {
+        -2
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inline images
+// ---------------------------------------------------------------------------
+
+/// Add an inline image from RGBA pixel data.
+///
+/// Returns the image ID (>0) on success, 0 on error.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `renderer_create`.
+/// - `pixels` must point to `pixel_len` valid bytes (must be width * height * 4).
+#[no_mangle]
+pub unsafe extern "C" fn renderer_add_image(
+    handle: *mut RendererHandle,
+    pixels: *const u8,
+    pixel_len: usize,
+    width: u32,
+    height: u32,
+    grid_row: u32,
+    grid_col: u32,
+    width_cells: u32,
+    height_cells: u32,
+) -> u32 {
+    if handle.is_null() || pixels.is_null() || pixel_len == 0 {
+        return 0;
+    }
+    let expected = (width as usize) * (height as usize) * 4;
+    if pixel_len < expected {
+        tracing::error!("renderer_add_image: pixel_len {pixel_len} < expected {expected}");
+        return 0;
+    }
+    let h = &*handle;
+    let mut r = match h.renderer.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::error!("renderer mutex poisoned");
+            return 0;
+        }
+    };
+    let slice = std::slice::from_raw_parts(pixels, pixel_len);
+    r.add_image(slice, width, height, grid_row, grid_col, width_cells, height_cells)
+}
+
+/// Remove an inline image by ID.
+///
+/// Returns 0 on success, -1 on null handle, -2 if no image with that ID existed.
+///
+/// # Safety
+/// - `handle` must be a valid pointer from `renderer_create`.
+#[no_mangle]
+pub unsafe extern "C" fn renderer_remove_image(
+    handle: *mut RendererHandle,
+    image_id: u32,
+) -> i32 {
+    if handle.is_null() {
+        return -1;
+    }
+    let h = &*handle;
+    let mut r = lock_or_err!(h, mutable);
+    if r.remove_image(image_id) {
         0
     } else {
         -2

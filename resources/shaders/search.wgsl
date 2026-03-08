@@ -35,11 +35,14 @@ fn search_row(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
         if (matched) {
-            let idx = atomicAdd(&match_count, 1u);
-            if (idx < params.max_results) {
-                // Two u32 slots per match: [row, col] — supports rows/cols beyond 65535
-                matches[idx * 2u] = row;
-                matches[idx * 2u + 1u] = col;
+            let current = atomicLoad(&match_count);
+            if (current < params.max_results) {
+                let idx = atomicAdd(&match_count, 1u);
+                if (idx < params.max_results) {
+                    // Two u32 slots per match: [row, col] — supports rows/cols beyond 65535
+                    matches[idx * 2u] = row;
+                    matches[idx * 2u + 1u] = col;
+                }
             }
         }
     }

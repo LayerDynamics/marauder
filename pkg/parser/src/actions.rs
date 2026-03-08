@@ -206,9 +206,25 @@ pub enum TerminalAction {
     /// iTerm2 inline image protocol data (OSC 1337). Uses Arc for cheap cloning through the event bus.
     ITermImage { #[serde(with = "arc_bytes")] data: std::sync::Arc<[u8]> },
 
+    // -- Errors --
+    /// A recoverable parser error (e.g., malformed image data). Callers can use
+    /// this to show a broken-image indicator or log diagnostics.
+    ParserError { kind: ParserErrorKind, message: String },
+
     // -- Raw fallback --
     /// CSI dispatch not matched to a specific action (raw params preserved).
     CsiRaw { params: Vec<u16>, intermediates: Vec<u8>, action: char },
     /// ESC dispatch not matched to a specific action.
     EscRaw { intermediates: Vec<u8>, action: u8 },
+}
+
+/// Classification of recoverable parser errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParserErrorKind {
+    /// Sixel DCS sequence could not be decoded into an image.
+    InvalidSixel,
+    /// iTerm2 inline image payload was malformed or had invalid base64.
+    InvalidITermImage,
+    /// Sixel data exceeded the maximum allowed size and was discarded.
+    SixelOverflow,
 }

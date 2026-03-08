@@ -15,6 +15,17 @@ use tokio::sync::broadcast;
 
 use crate::util::lock_or_recover;
 
+/// Callback type for compute hooks triggered after grid updates.
+///
+/// The hook receives the pane ID and shared grid reference. The runtime layer
+/// sets this to call `ComputeEngine::run_frame_compute` + `Renderer::apply_compute_results`
+/// and publish compute result events to the event bus.
+pub type ComputeHook = Arc<dyn Fn(PaneId, &Arc<Mutex<Grid>>) + Send + Sync>;
+
+/// Shared mutable slot for the compute hook, allowing updates after the
+/// pipeline task has been spawned.
+pub type SharedComputeHook = Arc<Mutex<Option<ComputeHook>>>;
+
 /// A single pane's pipeline: PTY reader → parser → grid.
 pub struct PanePipeline {
     /// The pane this pipeline belongs to.
@@ -29,6 +40,9 @@ pub struct PanePipeline {
     /// Cached source string for event bus events (avoids allocation per chunk).
     source_label: String,
     _processor_handle: tokio::task::JoinHandle<()>,
+    /// Optional compute hook called after GridUpdated to trigger async compute.
+    /// Shared with the spawned task so updates via `set_compute_hook` take effect.
+    pub compute_hook: SharedComputeHook,
 }
 
 impl PanePipeline {
@@ -46,9 +60,23 @@ impl PanePipeline {
         cols: u16,
         event_bus: SharedEventBus,
     ) -> Self {
+        Self::spawn_with_compute_hook(pane_id, reader, rows, cols, event_bus, None)
+    }
+
+    /// Spawn a pipeline with an optional compute hook.
+    pub fn spawn_with_compute_hook(
+        pane_id: PaneId,
+        reader: Box<dyn std::io::Read + Send>,
+        rows: u16,
+        cols: u16,
+        event_bus: SharedEventBus,
+        compute_hook: Option<ComputeHook>,
+    ) -> Self {
         let grid = Arc::new(Mutex::new(Grid::new(rows as usize, cols as usize)));
         let parser = Arc::new(Mutex::new(MarauderParser::new()));
         let pty_reader = PtyReader::spawn(pane_id, reader, Some(event_bus.clone()));
+
+        let shared_hook: SharedComputeHook = Arc::new(Mutex::new(compute_hook));
 
         let mut rx = pty_reader.subscribe();
         let grid_clone = Arc::clone(&grid);
@@ -56,11 +84,14 @@ impl PanePipeline {
         let bus_clone = event_bus.clone();
         let source_label = format!("pane:{pane_id}");
         let source_clone = source_label.clone();
+        let hook_ref = Arc::clone(&shared_hook);
 
         let handle = tokio::spawn(async move {
+            tracing::debug!(pane_id, "Pipeline processor task started");
             loop {
                 match rx.recv().await {
                     Ok(data) => {
+                        tracing::debug!(pane_id, bytes = data.len(), "Pipeline received PTY chunk");
                         Self::process_chunk(
                             pane_id,
                             &data,
@@ -69,6 +100,17 @@ impl PanePipeline {
                             &bus_clone,
                             &source_clone,
                         );
+                        // Fire compute hook after grid update — dispatched to the
+                        // blocking thread pool so GPU submission / lock acquisition
+                        // cannot stall PTY reads on this pane's async task.
+                        // Reads from the shared slot so set_compute_hook takes effect.
+                        let hook = hook_ref.lock().ok().and_then(|g| g.clone());
+                        if let Some(hook) = hook {
+                            let grid = Arc::clone(&grid_clone);
+                            tokio::task::spawn_blocking(move || {
+                                hook(pane_id, &grid);
+                            });
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         tracing::debug!(pane_id, "Pipeline receiver closed");
@@ -94,6 +136,7 @@ impl PanePipeline {
             event_bus,
             source_label,
             _processor_handle: handle,
+            compute_hook: shared_hook,
         }
     }
 
@@ -114,20 +157,44 @@ impl PanePipeline {
             let mut parser = lock_or_recover(parser, "parser");
             let mut grid = lock_or_recover(grid, "grid");
             let mut changed = false;
+            let mut action_count: u32 = 0;
             parser.feed(data, |action| {
                 grid.apply_action(&action);
+                action_count += 1;
                 changed = true;
             });
+            if changed {
+                tracing::debug!(
+                    pane_id,
+                    actions = action_count,
+                    cursor_row = grid.cursor.row,
+                    cursor_col = grid.cursor.col,
+                    cursor_visible = grid.cursor.visible,
+                    "Pipeline: parsed {action_count} actions from {} bytes",
+                    data.len()
+                );
+            }
             changed
         };
         // Only publish if the parser actually produced actions
         if grid_changed {
+            tracing::debug!(pane_id, "GridUpdated event publishing");
             event_bus.publish(
                 Event::new(EventType::GridUpdated, pane_id)
                     // Note: source_label.to_owned() allocates per-chunk, but the string is
                     // short (<20 bytes) and this is bounded by PTY output rate, not CPU-bound.
                     .with_source(source_label.to_owned()),
             );
+        }
+    }
+
+    /// Set the compute hook to be called after each grid update.
+    ///
+    /// Takes effect immediately — the spawned pipeline task reads from the
+    /// same shared slot updated here.
+    pub fn set_compute_hook(&self, hook: ComputeHook) {
+        if let Ok(mut guard) = self.compute_hook.lock() {
+            *guard = Some(hook);
         }
     }
 
