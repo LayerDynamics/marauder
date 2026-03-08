@@ -16,6 +16,7 @@ pub mod images;
 pub mod pipelines;
 pub mod renderer;
 pub mod types;
+pub mod web;
 
 pub use renderer::{PaneBorder, Renderer};
 pub use types::{CursorStyle, RendererConfig, ThemeColors};

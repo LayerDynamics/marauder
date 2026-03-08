@@ -9,8 +9,10 @@
 pub mod error;
 pub mod session;
 pub mod daemon;
+pub mod collab;
 pub mod ffi;
 
 pub use error::DaemonError;
 pub use session::{Session, SessionId, SessionInfo};
 pub use daemon::MarauderDaemon;
+pub use collab::{CollabManager, SessionCollaborator, CollabEvent, ClientPresence, ClientId};

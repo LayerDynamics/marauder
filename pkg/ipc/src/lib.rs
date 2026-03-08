@@ -1,11 +1,10 @@
-//! Unix socket IPC transport for the Marauder multiplexer daemon.
+//! IPC transport layer for the Marauder multiplexer daemon.
 //!
-//! Provides framed message passing over Unix domain sockets with
-//! serde JSON serialization. Used by `pkg/daemon` for client ↔ server
-//! communication.
+//! Provides framed message passing over multiple transports:
+//! - Unix domain sockets (primary, local-only)
+//! - TCP (for remote clients and WebSocket bridges)
 //!
-//! Phase 1: Types, framing, and basic server/client skeletons.
-//! Full implementation (reconnection, multiplexing, auth) comes later.
+//! All transports use the same framing protocol and message types.
 
 pub mod error;
 pub mod message;
@@ -14,6 +13,8 @@ pub mod framing;
 pub mod server;
 #[cfg(unix)]
 pub mod client;
+pub mod tcp_server;
+pub mod tcp_client;
 
 pub use error::IpcError;
 pub use message::{IpcMessage, IpcRequest, IpcResponse};
@@ -22,3 +23,5 @@ pub use framing::{FrameReader, FrameWriter};
 pub use server::IpcServer;
 #[cfg(unix)]
 pub use client::IpcClient;
+pub use tcp_server::TcpIpcServer;
+pub use tcp_client::TcpIpcClient;
