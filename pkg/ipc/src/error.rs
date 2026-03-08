@@ -27,4 +27,7 @@ pub enum IpcError {
 
     #[error("protocol violation: received unexpected request from server")]
     ProtocolViolation,
+
+    #[error("{0}")]
+    Other(String),
 }

@@ -47,6 +47,11 @@ let isSelecting = false;
 let selectionAnchorRow = 0;
 let selectionAnchorCol = 0;
 
+/** Track click count and timing for triple-click detection. */
+let lastClickTime = 0;
+let clickCount = 0;
+const MULTI_CLICK_THRESHOLD = 400; // ms
+
 /** Cached URL matches for the visible grid area. */
 let cachedUrlMatches: UrlMatch[] = [];
 
@@ -152,6 +157,28 @@ async function detectVisibleUrls(): Promise<void> {
       matches.push(...detectUrlsInRow(row, rowText));
     }
     cachedUrlMatches = matches;
+
+    // Push URL overlay data to renderer for underline rendering
+    if (matches.length > 0) {
+      invoke("renderer_set_url_overlays", {
+        matches: matches.map((m) => ({
+    // Push URL overlay data to renderer for underline rendering
+    if (matches.length > 0) {
+      invoke("renderer_set_url_overlays", {
+        matches: matches.map((m) => ({
+          row: m.row,
+          startCol: m.startCol,
+          endCol: m.endCol,
+        })),
+      }).catch((error) => {
+        console.error("renderer_set_url_overlays failed (with matches)", error);
+      });
+    } else {
+      // Clear URL overlays when no matches
+      invoke("renderer_set_url_overlays", { matches: [] }).catch((error) => {
+        console.error("renderer_set_url_overlays failed (clearing overlays)", error);
+      });
+    }
   } catch {
     // Grid snapshot not available
   }
@@ -195,6 +222,22 @@ function getPaneAtPixel(px: number, py: number): number | null {
 /** Handle mousedown on terminal grid — start selection. */
 function handleMouseDown(e: MouseEvent): void {
   if (activePaneId === null || e.button !== 0) return;
+
+  // Track multi-click for triple-click line select
+  const now = Date.now();
+  if (now - lastClickTime < MULTI_CLICK_THRESHOLD) {
+    clickCount++;
+  } else {
+    clickCount = 1;
+  }
+  lastClickTime = now;
+
+  if (clickCount >= 3) {
+    clickCount = 0;
+    handleTripleClick(e);
+    e.preventDefault();
+    return;
+  }
 
   // Multi-pane: focus the clicked pane region
   if (layoutRects.size > 1) {
@@ -319,6 +362,35 @@ async function handleDblClick(e: MouseEvent): Promise<void> {
   }
 }
 
+/** Handle triple-click — select entire line. */
+async function handleTripleClick(e: MouseEvent): Promise<void> {
+  if (activePaneId === null) return;
+
+  const gridEl = e.currentTarget as HTMLElement;
+  const rect = gridEl.getBoundingClientRect();
+  const { row } = pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
+  const paneId = activePaneId;
+
+  try {
+    const snapshot = await gridClient.getScreenSnapshot(paneId);
+    if (row >= snapshot.cells.length) return;
+    const rowLen = snapshot.cells[row].length;
+    gridClient.setSelection(paneId, row, 0, row, Math.max(0, rowLen - 1)).catch(console.error);
+  } catch {
+    gridClient.setSelection(paneId, row, 0, row, 79).catch(console.error);
+  }
+}
+
+/** Announce a message to screen readers via the sr-announcer live region. */
+function announceToScreenReader(message: string): void {
+  const el = document.getElementById("sr-announcer");
+  if (el) {
+    el.textContent = message;
+    // Clear after a short delay so repeated identical announcements work
+    setTimeout(() => { el.textContent = ""; }, 1000);
+  }
+}
+
 /** Decode a BusEvent payload (byte array) to a parsed object. */
 function decodePayload<T>(event: BusEvent): T | null {
   try {
@@ -399,6 +471,7 @@ function handleEvent(event: BusEvent): void {
       const p = decodePayload<PanePayload>(event);
       if (p) {
         tabBar.addTab(p.pane_id, `shell ${++tabCounter}`);
+        announceToScreenReader(`New terminal tab ${tabCounter} opened`);
       }
       break;
     }
@@ -406,6 +479,7 @@ function handleEvent(event: BusEvent): void {
       const p = decodePayload<PanePayload>(event);
       if (p) {
         tabBar.removeTab(p.pane_id);
+        announceToScreenReader("Terminal tab closed");
       }
       break;
     }
@@ -425,6 +499,7 @@ function handleEvent(event: BusEvent): void {
     }
     case EventType.ShellCommandFinished: {
       statusBar.clearCommand();
+      announceToScreenReader("Command finished");
       break;
     }
     case EventType.GridResized: {
@@ -596,7 +671,11 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
   // Clipboard: Ctrl+Shift+C (copy), Ctrl+Shift+V (paste)
   if (e.ctrlKey && e.shiftKey && e.key === "C") {
     gridClient.getSelectionText(paneId).then((text) => {
-      if (text) writeText(text).catch(console.error);
+      if (text) {
+        writeText(text).catch(console.error);
+        // Clear selection after copy
+        gridClient.clearSelection(paneId).catch(console.error);
+      }
     }).catch(console.error);
     return;
   }
@@ -607,6 +686,12 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
         ptyClient.write(paneId, bytes).catch(console.error);
       }
     }).catch(console.error);
+    return;
+  }
+
+  // Frame profiler toggle: Ctrl+Shift+P
+  if (e.ctrlKey && e.shiftKey && e.key === "P") {
+    invoke("renderer_toggle_profiler").catch(console.error);
     return;
   }
 

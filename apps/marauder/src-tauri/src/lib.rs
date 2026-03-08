@@ -16,6 +16,7 @@ use marauder_renderer::{Renderer, RendererConfig};
 use marauder_config_store::commands::TauriConfigStore;
 use marauder_runtime::{MarauderRuntime, RuntimeConfig};
 use marauder_runtime::commands::TauriRuntimeHandle;
+use marauder_runtime::recorder;
 
 /// Shared renderer handle, accessible from Tauri commands.
 type SharedRenderer = Arc<Mutex<Option<Renderer>>>;
@@ -198,6 +199,57 @@ fn renderer_mark_activity(
     }
 }
 
+/// Tauri command: toggle the frame profiler overlay on/off.
+#[tauri::command]
+fn renderer_toggle_profiler(
+    state: tauri::State<'_, SharedRenderer>,
+) -> Result<bool, String> {
+    let mut rend = state.lock().unwrap_or_else(|e| e.into_inner());
+    match rend.as_mut() {
+        Some(r) => {
+            let new_state = !r.profiler_enabled();
+            r.set_profiler_enabled(new_state);
+            Ok(new_state)
+        }
+        None => Err("Renderer not initialized".into()),
+    }
+}
+
+/// Typed URL overlay input from the webview.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UrlOverlayInput {
+    row: u32,
+    start_col: u32,
+    end_col: u32,
+}
+
+/// Tauri command: push URL overlay data from JS-side detection to the renderer.
+/// Accepts an array of typed `{row, startCol, endCol}` objects and converts them
+/// to compute overlay instances (underline mode) for the next frame.
+#[tauri::command]
+fn renderer_set_url_overlays(
+    state: tauri::State<'_, SharedRenderer>,
+    matches: Vec<UrlOverlayInput>,
+) -> Result<(), String> {
+    let mut rend = state.lock().unwrap_or_else(|e| e.into_inner());
+    match rend.as_mut() {
+        Some(r) => {
+            let url_matches: Vec<marauder_compute::UrlMatch> = matches
+                .into_iter()
+                .map(|m| marauder_compute::UrlMatch {
+                    row: m.row,
+                    start_col: m.start_col,
+                    end_col: m.end_col,
+                })
+                .collect();
+            r.apply_compute_results(&[], &url_matches, &[]);
+            Ok(())
+        }
+        None => Err("Renderer not initialized".into()),
+    }
+}
+
 /// Tauri command: notify the renderer of a window resize.
 #[tauri::command]
 fn renderer_resize(
@@ -278,6 +330,7 @@ pub fn run() {
         .manage(ipc_bridge::DenoBridge { tx: deno_tx })
         .manage(Mutex::new(Option::<event_bridge::TauriBridge>::None))
         .manage(extension_bridge)
+        .manage(recorder::create_shared_recorder(80, 24))
         .setup(move |app| {
             let window = app.get_webview_window("main")
                 .expect("main window not found");
@@ -685,6 +738,8 @@ pub fn run() {
             renderer_resize,
             renderer_set_pane_borders,
             renderer_set_scroll_offset,
+            renderer_set_url_overlays,
+            renderer_toggle_profiler,
             renderer_mark_activity,
             marauder_pty::commands::pty_cmd_create,
             marauder_pty::commands::pty_cmd_write,
@@ -712,6 +767,10 @@ pub fn run() {
             marauder_runtime::commands::runtime_cmd_pane_ids,
             marauder_runtime::commands::runtime_cmd_create_pane,
             marauder_runtime::commands::runtime_cmd_close_pane,
+            marauder_runtime::commands::recording_start,
+            marauder_runtime::commands::recording_stop,
+            marauder_runtime::commands::recording_export,
+            marauder_runtime::commands::recording_search,
             ipc_bridge::deno_eval,
             ipc_bridge::deno_call_op,
             ipc_bridge::resolve_keybinding,
