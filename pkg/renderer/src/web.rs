@@ -57,15 +57,16 @@ pub async fn create_web_surface(
     instance: &wgpu::Instance,
     canvas_selector: &str,
 ) -> Result<(wgpu::Surface<'static>, u32, u32), String> {
-    use wgpu::web_sys;
+    use wasm_bindgen::JsCast;
+    use web_sys::{window, HtmlCanvasElement};
 
-    let window = web_sys::window().ok_or("no window")?;
+    let window = window().ok_or("no window")?;
     let document = window.document().ok_or("no document")?;
     let canvas = document
         .query_selector(canvas_selector)
         .map_err(|_| "querySelector failed")?
         .ok_or("canvas element not found")?;
-    let canvas: web_sys::HtmlCanvasElement = canvas
+    let canvas: HtmlCanvasElement = canvas
         .dyn_into()
         .map_err(|_| "element is not a canvas")?;
 

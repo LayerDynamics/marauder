@@ -215,25 +215,32 @@ fn renderer_toggle_profiler(
     }
 }
 
+/// Typed URL overlay input from the webview.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UrlOverlayInput {
+    row: u32,
+    start_col: u32,
+    end_col: u32,
+}
+
 /// Tauri command: push URL overlay data from JS-side detection to the renderer.
-/// Accepts an array of {row, start_col, end_col} objects and converts them to
-/// compute overlay instances (underline mode) for the next frame.
+/// Accepts an array of typed `{row, startCol, endCol}` objects and converts them
+/// to compute overlay instances (underline mode) for the next frame.
 #[tauri::command]
 fn renderer_set_url_overlays(
     state: tauri::State<'_, SharedRenderer>,
-    matches: Vec<serde_json::Value>,
+    matches: Vec<UrlOverlayInput>,
 ) -> Result<(), String> {
     let mut rend = state.lock().unwrap_or_else(|e| e.into_inner());
     match rend.as_mut() {
         Some(r) => {
             let url_matches: Vec<marauder_compute::UrlMatch> = matches
-                .iter()
-                .filter_map(|m| {
-                    Some(marauder_compute::UrlMatch {
-                        row: m.get("row")?.as_u64()? as u32,
-                        start_col: m.get("startCol")?.as_u64()? as u32,
-                        end_col: m.get("endCol")?.as_u64()? as u32,
-                    })
+                .into_iter()
+                .map(|m| marauder_compute::UrlMatch {
+                    row: m.row,
+                    start_col: m.start_col,
+                    end_col: m.end_col,
                 })
                 .collect();
             r.apply_compute_results(&[], &url_matches, &[]);

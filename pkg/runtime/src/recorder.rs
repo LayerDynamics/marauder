@@ -60,8 +60,6 @@ pub struct SessionRecorder {
     start_time: Option<Instant>,
     events: Vec<RecordEvent>,
     header: RecordingHeader,
-    /// Maximum number of events before auto-flush (0 = unlimited).
-    max_events: usize,
 }
 
 impl SessionRecorder {
@@ -79,7 +77,6 @@ impl SessionRecorder {
                     .map(|d| d.as_secs()),
                 ..Default::default()
             },
-            max_events: 0,
         }
     }
 
@@ -197,10 +194,6 @@ impl SessionRecorder {
         self.header.title = Some(title);
     }
 
-    /// Set max events limit.
-    pub fn set_max_events(&mut self, max: usize) {
-        self.max_events = max;
-    }
 }
 
 /// Thread-safe shared recorder handle.

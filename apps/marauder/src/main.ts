@@ -47,6 +47,11 @@ let isSelecting = false;
 let selectionAnchorRow = 0;
 let selectionAnchorCol = 0;
 
+/** Track click count and timing for triple-click detection. */
+let lastClickTime = 0;
+let clickCount = 0;
+const MULTI_CLICK_THRESHOLD = 400; // ms
+
 /** Cached URL matches for the visible grid area. */
 let cachedUrlMatches: UrlMatch[] = [];
 
@@ -161,10 +166,14 @@ async function detectVisibleUrls(): Promise<void> {
           startCol: m.startCol,
           endCol: m.endCol,
         })),
-      }).catch(() => {});
+      }).catch((error) => {
+        console.error("renderer_set_url_overlays failed:", error);
+      });
     } else {
       // Clear URL overlays when no matches
-      invoke("renderer_set_url_overlays", { matches: [] }).catch(() => {});
+      invoke("renderer_set_url_overlays", { matches: [] }).catch((error) => {
+        console.error("renderer_set_url_overlays failed (clearing):", error);
+      });
     }
   } catch {
     // Grid snapshot not available
@@ -303,11 +312,6 @@ function handleMouseMove(e: MouseEvent): void {
 function handleMouseUp(_e: MouseEvent): void {
   isSelecting = false;
 }
-
-/** Track click count and timing for triple-click detection. */
-let lastClickTime = 0;
-let clickCount = 0;
-const MULTI_CLICK_THRESHOLD = 400; // ms
 
 /** Characters considered part of a "word" for double-click selection. */
 const WORD_CHAR_RE = /[A-Za-z0-9_\-./~]/;
