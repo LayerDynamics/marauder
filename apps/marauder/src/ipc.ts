@@ -59,7 +59,7 @@ export class EventBusClient {
     };
 
     const ids: number[] = await invoke("event_bus_subscribe_channel", {
-      event_types: eventTypes,
+      eventTypes,
       channel,
     });
 
@@ -80,8 +80,8 @@ export class EventBusClient {
     subscriberId: number
   ): Promise<void> {
     await invoke("event_bus_unsubscribe_channel", {
-      event_type: eventType,
-      subscriber_id: subscriberId,
+      eventType,
+      subscriberId,
     });
     this.channelBySubscriber.delete(subscriberId);
     const existing = this.subscriberIds.get(eventType);
@@ -97,7 +97,7 @@ export class EventBusClient {
 
   /** Emit an event from the webview (subject to allowlist). */
   async emit(eventType: EventTypeValue, payload: string): Promise<void> {
-    await invoke("event_bus_emit", { event_type: eventType, payload });
+    await invoke("event_bus_emit", { eventType, payload });
   }
 
   /** Clean up all active subscriptions. */
@@ -128,27 +128,27 @@ export class PtyClient {
   }
 
   async write(paneId: number, data: number[]): Promise<void> {
-    await invoke("pty_cmd_write", { pane_id: paneId, data });
+    await invoke("pty_cmd_write", { paneId, data });
   }
 
   async read(paneId: number, maxBytes: number = 65536): Promise<number[]> {
-    return invoke("pty_cmd_read", { pane_id: paneId, max_bytes: maxBytes });
+    return invoke("pty_cmd_read", { paneId, maxBytes });
   }
 
   async resize(paneId: number, rows: number, cols: number): Promise<void> {
-    await invoke("pty_cmd_resize", { pane_id: paneId, rows, cols });
+    await invoke("pty_cmd_resize", { paneId, rows, cols });
   }
 
   async close(paneId: number): Promise<void> {
-    await invoke("pty_cmd_close", { pane_id: paneId });
+    await invoke("pty_cmd_close", { paneId });
   }
 
   async getPid(paneId: number): Promise<number | null> {
-    return invoke("pty_cmd_get_pid", { pane_id: paneId });
+    return invoke("pty_cmd_get_pid", { paneId });
   }
 
   async wait(paneId: number): Promise<number | null> {
-    return invoke("pty_cmd_wait", { pane_id: paneId });
+    return invoke("pty_cmd_wait", { paneId });
   }
 
   async list(): Promise<PtyInfo[]> {
@@ -190,15 +190,15 @@ export class ConfigClient {
 /** Client for grid commands. */
 export class GridClient {
   async getCursor(paneId: number): Promise<CursorPosition> {
-    return invoke("grid_cmd_get_cursor", { pane_id: paneId });
+    return invoke("grid_cmd_get_cursor", { paneId });
   }
 
   async getCell(paneId: number, row: number, col: number): Promise<CellInfo> {
-    return invoke("grid_cmd_get_cell", { pane_id: paneId, row, col });
+    return invoke("grid_cmd_get_cell", { paneId, row, col });
   }
 
   async getSelectionText(paneId: number): Promise<string | null> {
-    return invoke("grid_cmd_get_selection_text", { pane_id: paneId });
+    return invoke("grid_cmd_get_selection_text", { paneId });
   }
 
   async setSelection(
@@ -209,32 +209,32 @@ export class GridClient {
     endCol: number
   ): Promise<void> {
     await invoke("grid_cmd_set_selection", {
-      pane_id: paneId,
-      start_row: startRow,
-      start_col: startCol,
-      end_row: endRow,
-      end_col: endCol,
+      paneId,
+      startRow,
+      startCol,
+      endRow,
+      endCol,
     });
   }
 
   async clearSelection(paneId: number): Promise<void> {
-    await invoke("grid_cmd_clear_selection", { pane_id: paneId });
+    await invoke("grid_cmd_clear_selection", { paneId });
   }
 
   async scrollViewport(paneId: number, offset: number): Promise<void> {
-    await invoke("grid_cmd_scroll_viewport", { pane_id: paneId, offset });
+    await invoke("grid_cmd_scroll_viewport", { paneId, offset });
   }
 
   async scrollViewportBy(paneId: number, delta: number): Promise<void> {
-    await invoke("grid_cmd_scroll_viewport_by", { pane_id: paneId, delta });
+    await invoke("grid_cmd_scroll_viewport_by", { paneId, delta });
   }
 
   async getScreenSnapshot(paneId: number): Promise<ScreenSnapshot> {
-    return invoke("grid_cmd_get_screen_snapshot", { pane_id: paneId });
+    return invoke("grid_cmd_get_screen_snapshot", { paneId });
   }
 
   async getDimensions(paneId: number): Promise<GridDimensions> {
-    return invoke("grid_cmd_get_dimensions", { pane_id: paneId });
+    return invoke("grid_cmd_get_dimensions", { paneId });
   }
 
   [Symbol.dispose](): void {
@@ -266,7 +266,7 @@ export class DenoClient {
     });
 
     const result: string = await invoke("deno_call_op", {
-      op_name: opName,
+      opName,
       args: sanitized,
     });
     try {
@@ -288,7 +288,7 @@ export class RendererClient {
   }
 
   async resize(width: number, height: number, scaleFactor: number): Promise<void> {
-    await invoke("renderer_resize", { width, height, scale_factor: scaleFactor });
+    await invoke("renderer_resize", { width, height, scaleFactor });
   }
 
   [Symbol.dispose](): void {
@@ -311,7 +311,7 @@ export class RuntimeClient {
   }
 
   async closePane(paneId: number): Promise<void> {
-    await invoke("runtime_cmd_close_pane", { pane_id: paneId });
+    await invoke("runtime_cmd_close_pane", { paneId });
   }
 
   [Symbol.dispose](): void {
@@ -358,8 +358,8 @@ export class ExtensionBridgeClient {
     data: unknown,
   ): Promise<void> {
     await invoke("extension_post_message", {
-      extension_name: extensionName,
-      message_type: type,
+      extensionName,
+      messageType: type,
       data: JSON.stringify(data),
     });
   }

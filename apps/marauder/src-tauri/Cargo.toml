@@ -32,3 +32,5 @@ marauder-runtime = { path = "../../../pkg/runtime", features = ["tauri-commands"
 marauder-config-store = { path = "../../../pkg/config-store", features = ["tauri-commands"] }
 tauri-plugin-clipboard-manager = "2"
 wgpu = { workspace = true }
+raw-window-handle = { workspace = true }
+pollster = "0.4"

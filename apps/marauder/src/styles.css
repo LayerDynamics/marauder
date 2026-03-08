@@ -8,6 +8,10 @@
   --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", Menlo, monospace;
 }
 
+html {
+  background: transparent !important;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -16,18 +20,13 @@
 
 body {
   margin: 0;
-  background: #11111b;
+  background: transparent;
   overflow: hidden;
   height: 100vh;
   font-family: var(--font-mono);
   color: var(--fg-chrome);
   display: flex;
   flex-direction: column;
-}
-
-/* Once wgpu is compositing underneath, set body transparent via JS */
-body.wgpu-ready {
-  background: transparent;
 }
 
 /* Tab bar — fixed top, opaque */

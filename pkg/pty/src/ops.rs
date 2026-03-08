@@ -57,7 +57,9 @@ pub fn op_pty_create(
         shell: shell.unwrap_or_else(pty::default_shell),
         env: HashMap::new(),
         cwd: cwd.map(PathBuf::from).unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
         }),
         rows: rows as u16,
         cols: cols as u16,

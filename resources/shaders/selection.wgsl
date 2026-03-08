@@ -9,7 +9,8 @@ struct Uniforms {
     viewport_size: vec2<f32>,
     cell_size: vec2<f32>,
     grid_offset: vec2<f32>,
-    _pad: vec2<f32>,
+    scale_factor: f32,
+    _pad: f32,
 };
 
 struct SelectionInstance {

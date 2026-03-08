@@ -80,11 +80,28 @@ pub enum EventType {
 
     // Renderer readiness
     RendererReady = 31,
+
+    // Compute results
+    ComputeSearchResult = 32,
+    ComputeUrlsDetected = 33,
+    ComputeHighlightsReady = 34,
+
+    // Scrollback tier transitions
+    ScrollbackTierChanged = 35,
+
+    // Cold scrollback search progress
+    ComputeScrollbackSearchProgress = 36,
+
+    // Image protocol received
+    ImageReceived = 37,
+
+    // GPU diff result
+    ComputeDiffResult = 38,
 }
 
 impl EventType {
     /// Maximum valid discriminant value.
-    pub const MAX_DISCRIMINANT: u32 = 31;
+    pub const MAX_DISCRIMINANT: u32 = 38;
 
     /// Try to convert a u32 discriminant to an EventType.
     pub fn from_u32(value: u32) -> Result<Self, EventError> {
@@ -121,6 +138,13 @@ impl EventType {
             29 => Ok(Self::ExtensionUnloaded),
             30 => Ok(Self::ExtensionMessage),
             31 => Ok(Self::RendererReady),
+            32 => Ok(Self::ComputeSearchResult),
+            33 => Ok(Self::ComputeUrlsDetected),
+            34 => Ok(Self::ComputeHighlightsReady),
+            35 => Ok(Self::ScrollbackTierChanged),
+            36 => Ok(Self::ComputeScrollbackSearchProgress),
+            37 => Ok(Self::ImageReceived),
+            38 => Ok(Self::ComputeDiffResult),
             _ => Err(EventError::InvalidEventType(value)),
         }
     }
@@ -128,6 +152,32 @@ impl EventType {
     /// Convert to u32 discriminant.
     pub fn as_u32(self) -> u32 {
         self as u32
+    }
+
+    /// All event type variants in discriminant order.
+    ///
+    /// Generated from `MAX_DISCRIMINANT` so that adding a new variant
+    /// (and updating `from_u32` + `MAX_DISCRIMINANT`) automatically
+    /// includes it here — no separate list to maintain.
+    pub fn all() -> Vec<EventType> {
+        (0..=Self::MAX_DISCRIMINANT)
+            .filter_map(|d| Self::from_u32(d).ok())
+            .collect()
+    }
+
+    /// Returns `true` for event types that fire at frame-rate or higher
+    /// and should NOT be forwarded to the webview bridge.
+    pub fn is_hot_path(self) -> bool {
+        matches!(
+            self,
+            EventType::PtyOutput
+                | EventType::ParserAction
+                | EventType::GridUpdated
+                | EventType::RenderFrameRequested
+                | EventType::RenderFrameCompleted
+                | EventType::ScrollbackTierChanged
+                | EventType::ComputeScrollbackSearchProgress
+        )
     }
 }
 

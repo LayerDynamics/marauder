@@ -3,9 +3,11 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { writeText, readText } from "@tauri-apps/plugin-clipboard-manager";
 import { EventBusClient, PtyClient, GridClient } from "./ipc";
-import { detectUrlsInRow, findUrlAtCell, openUrl, type UrlMatch } from "../../../lib/ui/url-handler";
+import { detectUrlsInRow, findUrlAtCell, openUrl, setUrlOpener, type UrlMatch } from "../../../lib/ui/url-handler";
+import { openUrl as tauriOpenUrl } from "@tauri-apps/plugin-opener";
 import { TabBar } from "./components/tab-bar";
 import { StatusBar } from "./components/status-bar";
 import { SearchBar } from "./components/search-bar";
@@ -53,8 +55,9 @@ let layoutRects: Map<number, { x: number; y: number; w: number; h: number }> = n
 
 /** Convert pixel coordinates relative to grid element to cell coordinates. */
 function pixelToCell(x: number, y: number): { row: number; col: number } {
-  const cw = cellWidth || 8.4;
-  const ch = cellHeight || 16.8;
+  const dpr = window.devicePixelRatio || 1;
+  const cw = (cellWidth || 8.4) / dpr;
+  const ch = (cellHeight || 16.8) / dpr;
   return {
     col: Math.floor(x / cw),
     row: Math.floor(y / ch),
@@ -93,7 +96,8 @@ function animateScroll(): void {
   requestAnimationFrame(animateScroll);
 
   // Integer part = full lines to scroll via grid
-  const ch = cellHeight || 16.8;
+  const dprScroll = window.devicePixelRatio || 1;
+  const ch = (cellHeight || 16.8) / dprScroll;
   const fullLines = Math.trunc(scrollCurrent / ch);
   const fractional = scrollCurrent - fullLines * ch;
 
@@ -201,7 +205,7 @@ function handleMouseDown(e: MouseEvent): void {
       resetScrollState();
       activePaneId = clickedPane;
       invoke("event_bus_emit", {
-        event_type: EventType.PaneFocused,
+        eventType: EventType.PaneFocused,
         payload: JSON.stringify({ paneId: clickedPane }),
       }).catch(console.error);
     }
@@ -352,16 +356,26 @@ async function fetchCellSize(): Promise<void> {
 /** Create a new terminal tab with its own PTY session. */
 async function createTab(): Promise<void> {
   try {
-    const info: PtyInfo = await ptyClient.create({ rows: 24, cols: 80 });
+    // Use the runtime command which creates the full PTY→parser→grid pipeline.
+    const paneId: number = await invoke("runtime_cmd_create_pane");
     tabCounter++;
-    tabBar.addTab(info.pane_id, `shell ${tabCounter}`);
+    tabBar.addTab(paneId, `shell ${tabCounter}`);
     resetScrollState();
-    activePaneId = info.pane_id;
-    statusBar.setDimensions(info.rows, info.cols);
+    activePaneId = paneId;
+    statusBar.setDimensions(24, 80);
     statusBar.setCwd("~");
   } catch (e) {
-    console.error("Failed to create PTY session:", e);
+    console.error("Failed to create pane:", e);
   }
+}
+
+/** Adopt an already-created pane (e.g., the runtime's initial pane). */
+function adoptPane(paneId: number): void {
+  tabCounter++;
+  tabBar.addTab(paneId, `shell ${tabCounter}`);
+  activePaneId = paneId;
+  statusBar.setDimensions(24, 80);
+  statusBar.setCwd("~");
 }
 
 /** Close a terminal tab and its PTY session. */
@@ -606,18 +620,21 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
     return;
   }
 
-  // Phase 1: Check for keybinding action via backend
+  // Phase 1: Check for keybinding action via backend (only for modified keys)
   const keySeq = buildKeySequence(e);
+  const hasModifier = e.ctrlKey || e.altKey;
 
-  try {
-    const result = await invoke("resolve_keybinding", { keySeq });
-    const res = result as { action: string | null } | null;
-    if (res?.action) {
-      // UI action handled by backend — don't write to PTY
-      return;
+  if (hasModifier) {
+    try {
+      const result = await invoke("resolve_keybinding", { keySeq });
+      const res = result as { action: string | null } | null;
+      if (res?.action) {
+        // UI action handled by backend — don't write to PTY
+        return;
+      }
+    } catch {
+      // resolve_keybinding command not available yet — fall through to direct PTY write
     }
-  } catch {
-    // resolve_keybinding command not available yet — fall through to direct PTY write
   }
 
   // Phase 2: Encode and write to PTY (only reached when no keybinding matched)
@@ -631,7 +648,7 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
 
   // Publish KeyInput event for extensions via event bus bridge
   invoke("event_bus_emit", {
-    event_type: EventType.KeyInput,
+    eventType: EventType.KeyInput,
     payload: JSON.stringify({ paneId: paneId, keySeq }),
   }).catch((err) => {
     console.warn("Failed to emit KeyInput event:", err);
@@ -655,8 +672,12 @@ function handleResizeImpl(): void {
 
   if (cellWidth <= 0 || cellHeight <= 0) return;
 
-  const cols = Math.floor(grid.clientWidth / cellWidth);
-  const rows = Math.floor(grid.clientHeight / cellHeight);
+  // cellWidth/cellHeight are in physical pixels; clientWidth/clientHeight are CSS pixels
+  const dpr = window.devicePixelRatio || 1;
+  const cssCellW = cellWidth / dpr;
+  const cssCellH = cellHeight / dpr;
+  const cols = Math.floor(grid.clientWidth / cssCellW);
+  const rows = Math.floor(grid.clientHeight / cssCellH);
 
   if (cols > 0 && rows > 0) {
     ptyClient.resize(activePaneId, rows, cols).catch((e) => {
@@ -696,6 +717,15 @@ function teardown(): void {
 
 /** Bootstrap the application. */
 window.addEventListener("DOMContentLoaded", async () => {
+  // Register Tauri opener so lib/ui/url-handler can open URLs natively
+  setUrlOpener((url) => tauriOpenUrl(url));
+
+  // Listen for direct RendererReady Tauri event (fires before event bridge is connected)
+  listen("marauder://renderer-ready", () => {
+    document.body.classList.add("wgpu-ready");
+    fetchCellSize().catch((e) => console.error("Failed to fetch cell size:", e));
+  });
+
   const tabBarEl = document.getElementById("tab-bar")!;
   const statusBarEl = document.getElementById("status-bar")!;
   const searchBarEl = document.getElementById("search-bar-container")!;
@@ -762,7 +792,26 @@ window.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("beforeunload", teardown);
 
   // Create initial tab
-  await createTab();
+  // Try to adopt the runtime's pre-created initial pane, with retry since
+  // the runtime boots asynchronously on a background thread.
+  let adopted = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      const paneIds: number[] = await invoke("runtime_cmd_pane_ids");
+      if (paneIds.length > 0) {
+        adoptPane(paneIds[0]);
+        adopted = true;
+        break;
+      }
+    } catch {
+      // Runtime not ready yet
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!adopted) {
+    // Fallback: create a new pane via the runtime
+    await createTab();
+  }
 
   // Initial URL detection (subsequent runs triggered by GridUpdated events)
   detectVisibleUrls();

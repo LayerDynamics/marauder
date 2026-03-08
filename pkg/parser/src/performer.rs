@@ -1,14 +1,22 @@
 use crate::actions::*;
+use crate::sixel::SixelDecoder;
 
 /// VT parser wrapping the `vte` crate.
+///
+/// The `sixel_decoder` field holds cross-call state for DCS sixel sequences.
+/// The VTE `hook` / `put` / `unhook` callbacks are invoked across multiple
+/// `feed()` calls when the DCS sequence spans buffer boundaries, so the
+/// decoder must live on the parser rather than on the ephemeral performer.
 pub struct MarauderParser {
     parser: vte::Parser,
+    sixel_decoder: SixelDecoder,
 }
 
 impl MarauderParser {
     pub fn new() -> Self {
         Self {
             parser: vte::Parser::new(),
+            sixel_decoder: SixelDecoder::new(),
         }
     }
 
@@ -16,6 +24,7 @@ impl MarauderParser {
     pub fn feed<F: FnMut(TerminalAction)>(&mut self, bytes: &[u8], mut callback: F) {
         let mut performer = MarauderPerformer {
             callback: &mut callback,
+            sixel_decoder: &mut self.sixel_decoder,
         };
         self.parser.advance(&mut performer, bytes);
     }
@@ -30,6 +39,7 @@ impl Default for MarauderParser {
 /// Implements `vte::Perform` to convert VTE callbacks into `TerminalAction` variants.
 struct MarauderPerformer<'a, F: FnMut(TerminalAction)> {
     callback: &'a mut F,
+    sixel_decoder: &'a mut SixelDecoder,
 }
 
 impl<'a, F: FnMut(TerminalAction)> MarauderPerformer<'a, F> {
@@ -37,6 +47,7 @@ impl<'a, F: FnMut(TerminalAction)> MarauderPerformer<'a, F> {
         (self.callback)(action);
     }
 }
+
 
 impl<'a, F: FnMut(TerminalAction)> vte::Perform for MarauderPerformer<'a, F> {
     fn print(&mut self, c: char) {
@@ -55,22 +66,45 @@ impl<'a, F: FnMut(TerminalAction)> vte::Perform for MarauderPerformer<'a, F> {
         }
     }
 
-    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
-        // DCS hook — not commonly needed for basic terminal emulation
+    fn hook(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // Attempt to claim DCS sequences for image protocols.
+        // Sixel DCS uses final byte 'q'.
+        self.sixel_decoder.hook(params, intermediates, action);
     }
 
-    fn put(&mut self, _byte: u8) {
-        // DCS put — not commonly needed for basic terminal emulation
+    fn put(&mut self, byte: u8) {
+        // Forward data bytes to whichever DCS handler is active.
+        self.sixel_decoder.put(byte);
     }
 
     fn unhook(&mut self) {
-        // DCS unhook
+        let was_active = self.sixel_decoder.is_active();
+        let was_overflow = self.sixel_decoder.is_overflow();
+        match self.sixel_decoder.unhook() {
+            Some(image) => {
+                let pixels: std::sync::Arc<[u8]> = image.pixels.into();
+                self.emit(TerminalAction::SixelData { data: pixels });
+            }
+            None if was_overflow => {
+                self.emit(TerminalAction::ParserError {
+                    kind: ParserErrorKind::SixelOverflow,
+                    message: "Sixel data exceeded maximum size limit".into(),
+                });
+            }
+            None if was_active => {
+                self.emit(TerminalAction::ParserError {
+                    kind: ParserErrorKind::InvalidSixel,
+                    message: "Sixel DCS sequence contained no valid image data".into(),
+                });
+            }
+            None => {} // DCS wasn't a sixel sequence — nothing to report
+        }
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         let _ = bell_terminated;
         let command = if !params.is_empty() {
-            // First param is typically the OSC command number
+            // First param is typically the OSC command number.
             std::str::from_utf8(params[0])
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
@@ -78,6 +112,36 @@ impl<'a, F: FnMut(TerminalAction)> vte::Perform for MarauderPerformer<'a, F> {
         } else {
             0
         };
+
+        // iTerm2 inline image protocol: OSC 1337.
+        if command == 1337 {
+            let data = if params.len() > 1 {
+                params[1..]
+                    .iter()
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(";")
+            } else {
+                String::new()
+            };
+
+            if data.starts_with("File=") {
+                match crate::iterm2::parse_iterm2_image(&data) {
+                    Some((_img_params, decoded)) => {
+                        let arc_data: std::sync::Arc<[u8]> = decoded.into();
+                        self.emit(TerminalAction::ITermImage { data: arc_data });
+                        return;
+                    }
+                    None => {
+                        self.emit(TerminalAction::ParserError {
+                            kind: ParserErrorKind::InvalidITermImage,
+                            message: "Malformed iTerm2 inline image payload".into(),
+                        });
+                        return;
+                    }
+                }
+            }
+        }
 
         let data = if params.len() > 1 {
             params[1..]

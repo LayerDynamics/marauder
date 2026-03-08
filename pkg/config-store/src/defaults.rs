@@ -40,6 +40,17 @@ impl ConfigLayer {
         values.insert("terminal.rows".into(), Value::Number(24.into()));
         values.insert("terminal.cols".into(), Value::Number(80.into()));
 
+        // Scrollback — tiered storage
+        values.insert("scrollback.disk_enabled".into(), Value::Bool(false));
+        values.insert("scrollback.hot_rows".into(), Value::Number(10000.into()));
+        values.insert("scrollback.warm_max_rows".into(), Value::Number(1_000_000.into()));
+        values.insert("scrollback.compress".into(), Value::Bool(true));
+        values.insert("scrollback.secure_clear".into(), Value::Bool(false));
+        values.insert("scrollback.directory".into(), Value::String(String::new()));
+
+        // Highlight rules (empty array by default)
+        values.insert("highlight.rules".into(), Value::Array(Vec::new()));
+
         Self {
             kind: LayerKind::Default,
             values,

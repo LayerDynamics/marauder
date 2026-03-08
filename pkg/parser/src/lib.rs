@@ -1,4 +1,6 @@
 pub mod actions;
+pub mod sixel;
+pub mod iterm2;
 pub mod ffi;
 pub mod performer;
 pub mod bindgen;

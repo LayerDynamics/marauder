@@ -20,6 +20,8 @@ deno_core = { workspace = true }
 deno_error = { workspace = true }
 unicode-width = { workspace = true }
 tauri = { workspace = true, optional = true }
+lz4_flex = { workspace = true }
+zeroize = { workspace = true }
 
 [features]
 default = []

@@ -157,11 +157,14 @@ fn match_mailto(base: u32, col: u32, cols: u32) -> bool {
 }
 
 fn emit_result(row: u32, start_col: u32, end_col: u32) {
-    let idx = atomicAdd(&result_count, 1u);
-    if (idx < params.max_results) {
-        results[idx * 3u] = row;
-        results[idx * 3u + 1u] = start_col;
-        results[idx * 3u + 2u] = end_col;
+    let current = atomicLoad(&result_count);
+    if (current < params.max_results) {
+        let idx = atomicAdd(&result_count, 1u);
+        if (idx < params.max_results) {
+            results[idx * 3u] = row;
+            results[idx * 3u + 1u] = start_col;
+            results[idx * 3u + 2u] = end_col;
+        }
     }
 }
 

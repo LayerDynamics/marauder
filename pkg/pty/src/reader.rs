@@ -67,6 +67,11 @@ impl PtyReader {
                             break;
                         }
                         Ok(n) => {
+                            tracing::debug!(
+                                pane_id,
+                                bytes = n,
+                                "PtyReader: read {n} bytes from PTY"
+                            );
                             let data = buf[..n].to_vec();
 
                             // Publish to event bus if available

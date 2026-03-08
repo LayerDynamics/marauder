@@ -200,6 +200,11 @@ mod tests {
         assert!(!is_op_allowed("eval"));
         assert!(!is_op_allowed("op_pty_create; rm -rf /"));
         assert!(!is_op_allowed(""));
+        // Injection attempts via special characters
+        assert!(!is_op_allowed("op_pty_create()"));
+        assert!(!is_op_allowed("op_pty_create\n"));
+        assert!(!is_op_allowed("op_grid_.exec('whoami')"));
+        assert!(!is_op_allowed("op_pty_create(1)//"));
     }
 
 }

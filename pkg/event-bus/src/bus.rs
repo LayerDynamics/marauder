@@ -136,6 +136,14 @@ impl EventBus {
             let subs = read_or_log(&self.subscribers, "EventBus::publish/subscribers");
             subs.get(&current_event.event_type).cloned().unwrap_or_default()
         };
+
+        tracing::trace!(
+            event_type = ?current_event.event_type,
+            subscriber_count = subscriber_snapshot.len(),
+            source = ?current_event.source,
+            "EventBus::publish dispatching"
+        );
+
         // Subscriber lock is now dropped — callbacks can safely call subscribe/unsubscribe/publish
         for subscriber in &subscriber_snapshot {
             (subscriber.callback)(&current_event);

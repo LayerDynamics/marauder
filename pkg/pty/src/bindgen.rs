@@ -33,7 +33,9 @@ fn pty_bindgen_open(handle_id: u32, shell: &str, cwd: &str, rows: u16, cols: u16
     if rows == 0 || cols == 0 { return 0; }
     let shell = if shell.is_empty() { pty::default_shell() } else { shell.to_string() };
     let cwd = if cwd.is_empty() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
     } else {
         PathBuf::from(cwd)
     };
