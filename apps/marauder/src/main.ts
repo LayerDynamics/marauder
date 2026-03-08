@@ -152,6 +152,20 @@ async function detectVisibleUrls(): Promise<void> {
       matches.push(...detectUrlsInRow(row, rowText));
     }
     cachedUrlMatches = matches;
+
+    // Push URL overlay data to renderer for underline rendering
+    if (matches.length > 0) {
+      invoke("renderer_set_url_overlays", {
+        matches: matches.map((m) => ({
+          row: m.row,
+          startCol: m.startCol,
+          endCol: m.endCol,
+        })),
+      }).catch(() => {});
+    } else {
+      // Clear URL overlays when no matches
+      invoke("renderer_set_url_overlays", { matches: [] }).catch(() => {});
+    }
   } catch {
     // Grid snapshot not available
   }
@@ -195,6 +209,22 @@ function getPaneAtPixel(px: number, py: number): number | null {
 /** Handle mousedown on terminal grid — start selection. */
 function handleMouseDown(e: MouseEvent): void {
   if (activePaneId === null || e.button !== 0) return;
+
+  // Track multi-click for triple-click line select
+  const now = Date.now();
+  if (now - lastClickTime < MULTI_CLICK_THRESHOLD) {
+    clickCount++;
+  } else {
+    clickCount = 1;
+  }
+  lastClickTime = now;
+
+  if (clickCount >= 3) {
+    clickCount = 0;
+    handleTripleClick(e);
+    e.preventDefault();
+    return;
+  }
 
   // Multi-pane: focus the clicked pane region
   if (layoutRects.size > 1) {
@@ -274,6 +304,11 @@ function handleMouseUp(_e: MouseEvent): void {
   isSelecting = false;
 }
 
+/** Track click count and timing for triple-click detection. */
+let lastClickTime = 0;
+let clickCount = 0;
+const MULTI_CLICK_THRESHOLD = 400; // ms
+
 /** Characters considered part of a "word" for double-click selection. */
 const WORD_CHAR_RE = /[A-Za-z0-9_\-./~]/;
 
@@ -316,6 +351,25 @@ async function handleDblClick(e: MouseEvent): Promise<void> {
   } catch {
     // Snapshot unavailable — fall back to single-cell selection
     gridClient.setSelection(paneId, row, col, row, col).catch(console.error);
+  }
+}
+
+/** Handle triple-click — select entire line. */
+async function handleTripleClick(e: MouseEvent): Promise<void> {
+  if (activePaneId === null) return;
+
+  const gridEl = e.currentTarget as HTMLElement;
+  const rect = gridEl.getBoundingClientRect();
+  const { row } = pixelToCell(e.clientX - rect.left, e.clientY - rect.top);
+  const paneId = activePaneId;
+
+  try {
+    const snapshot = await gridClient.getScreenSnapshot(paneId);
+    if (row >= snapshot.cells.length) return;
+    const rowLen = snapshot.cells[row].length;
+    gridClient.setSelection(paneId, row, 0, row, Math.max(0, rowLen - 1)).catch(console.error);
+  } catch {
+    gridClient.setSelection(paneId, row, 0, row, 79).catch(console.error);
   }
 }
 
@@ -596,7 +650,11 @@ async function handleKeyInput(e: KeyboardEvent): Promise<void> {
   // Clipboard: Ctrl+Shift+C (copy), Ctrl+Shift+V (paste)
   if (e.ctrlKey && e.shiftKey && e.key === "C") {
     gridClient.getSelectionText(paneId).then((text) => {
-      if (text) writeText(text).catch(console.error);
+      if (text) {
+        writeText(text).catch(console.error);
+        // Clear selection after copy
+        gridClient.clearSelection(paneId).catch(console.error);
+      }
     }).catch(console.error);
     return;
   }

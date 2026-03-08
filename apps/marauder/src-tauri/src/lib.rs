@@ -198,6 +198,34 @@ fn renderer_mark_activity(
     }
 }
 
+/// Tauri command: push URL overlay data from JS-side detection to the renderer.
+/// Accepts an array of {row, start_col, end_col} objects and converts them to
+/// compute overlay instances (underline mode) for the next frame.
+#[tauri::command]
+fn renderer_set_url_overlays(
+    state: tauri::State<'_, SharedRenderer>,
+    matches: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let mut rend = state.lock().unwrap_or_else(|e| e.into_inner());
+    match rend.as_mut() {
+        Some(r) => {
+            let url_matches: Vec<marauder_compute::UrlMatch> = matches
+                .iter()
+                .filter_map(|m| {
+                    Some(marauder_compute::UrlMatch {
+                        row: m.get("row")?.as_u64()? as u32,
+                        start_col: m.get("startCol")?.as_u64()? as u32,
+                        end_col: m.get("endCol")?.as_u64()? as u32,
+                    })
+                })
+                .collect();
+            r.apply_compute_results(&[], &url_matches, &[]);
+            Ok(())
+        }
+        None => Err("Renderer not initialized".into()),
+    }
+}
+
 /// Tauri command: notify the renderer of a window resize.
 #[tauri::command]
 fn renderer_resize(
@@ -685,6 +713,7 @@ pub fn run() {
             renderer_resize,
             renderer_set_pane_borders,
             renderer_set_scroll_offset,
+            renderer_set_url_overlays,
             renderer_mark_activity,
             marauder_pty::commands::pty_cmd_create,
             marauder_pty::commands::pty_cmd_write,
