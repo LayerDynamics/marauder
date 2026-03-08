@@ -162,17 +162,21 @@ async function detectVisibleUrls(): Promise<void> {
     if (matches.length > 0) {
       invoke("renderer_set_url_overlays", {
         matches: matches.map((m) => ({
+    // Push URL overlay data to renderer for underline rendering
+    if (matches.length > 0) {
+      invoke("renderer_set_url_overlays", {
+        matches: matches.map((m) => ({
           row: m.row,
           startCol: m.startCol,
           endCol: m.endCol,
         })),
       }).catch((error) => {
-        console.error("renderer_set_url_overlays failed:", error);
+        console.error("renderer_set_url_overlays failed (with matches)", error);
       });
     } else {
       // Clear URL overlays when no matches
       invoke("renderer_set_url_overlays", { matches: [] }).catch((error) => {
-        console.error("renderer_set_url_overlays failed (clearing):", error);
+        console.error("renderer_set_url_overlays failed (clearing overlays)", error);
       });
     }
   } catch {
