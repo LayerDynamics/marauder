@@ -3,6 +3,7 @@ pub mod error;
 pub mod hooks;
 pub mod lifecycle;
 pub mod pipeline;
+pub mod recorder;
 pub mod ffi;
 pub mod bindgen;
 pub mod util;

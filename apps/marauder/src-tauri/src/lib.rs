@@ -16,6 +16,7 @@ use marauder_renderer::{Renderer, RendererConfig};
 use marauder_config_store::commands::TauriConfigStore;
 use marauder_runtime::{MarauderRuntime, RuntimeConfig};
 use marauder_runtime::commands::TauriRuntimeHandle;
+use marauder_runtime::recorder;
 
 /// Shared renderer handle, accessible from Tauri commands.
 type SharedRenderer = Arc<Mutex<Option<Renderer>>>;
@@ -322,6 +323,7 @@ pub fn run() {
         .manage(ipc_bridge::DenoBridge { tx: deno_tx })
         .manage(Mutex::new(Option::<event_bridge::TauriBridge>::None))
         .manage(extension_bridge)
+        .manage(recorder::create_shared_recorder(80, 24))
         .setup(move |app| {
             let window = app.get_webview_window("main")
                 .expect("main window not found");
@@ -758,6 +760,10 @@ pub fn run() {
             marauder_runtime::commands::runtime_cmd_pane_ids,
             marauder_runtime::commands::runtime_cmd_create_pane,
             marauder_runtime::commands::runtime_cmd_close_pane,
+            marauder_runtime::commands::recording_start,
+            marauder_runtime::commands::recording_stop,
+            marauder_runtime::commands::recording_export,
+            marauder_runtime::commands::recording_search,
             ipc_bridge::deno_eval,
             ipc_bridge::deno_call_op,
             ipc_bridge::resolve_keybinding,

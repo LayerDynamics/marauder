@@ -9,9 +9,10 @@
   </head>
 
   <body>
-    <div id="tab-bar"></div>
-    <div id="search-bar-container"></div>
-    <div id="terminal-grid"></div>
-    <div id="status-bar"></div>
+    <div id="tab-bar" role="tablist" aria-label="Terminal tabs"></div>
+    <div id="search-bar-container" role="search" aria-label="Find in terminal"></div>
+    <div id="terminal-grid" role="document" aria-label="Terminal output" aria-live="off" tabindex="0"></div>
+    <div id="status-bar" role="status" aria-label="Terminal status" aria-live="polite"></div>
+    <div id="sr-announcer" role="log" aria-live="assertive" aria-atomic="true" class="sr-only"></div>
   </body>
 </html>

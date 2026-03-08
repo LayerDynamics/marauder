@@ -1,11 +1,13 @@
 //! Tauri command wrappers for runtime operations.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use marauder_event_bus::lock_or_log;
 use marauder_grid::PaneGridMap;
 
 use crate::lifecycle::MarauderRuntime;
+use crate::recorder::{self, SharedRecorder};
 
 /// Tauri managed state wrapping the runtime.
 ///
@@ -93,4 +95,55 @@ pub fn runtime_cmd_close_pane(
 
         Ok(())
     })
+}
+
+// ─── Recording commands ──────────────────────────────────────────────────
+
+/// Tauri managed state for the session recorder.
+pub type TauriRecorder = SharedRecorder;
+
+#[tauri::command]
+pub fn recording_start(
+    state: tauri::State<'_, TauriRecorder>,
+) -> Result<(), String> {
+    let mut rec = state.lock().unwrap_or_else(|e| e.into_inner());
+    rec.start();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn recording_stop(
+    state: tauri::State<'_, TauriRecorder>,
+) -> Result<u32, String> {
+    let mut rec = state.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(rec.stop() as u32)
+}
+
+#[tauri::command]
+pub fn recording_export(
+    state: tauri::State<'_, TauriRecorder>,
+    path: String,
+) -> Result<(), String> {
+    let rec = state.lock().unwrap_or_else(|e| e.into_inner());
+    rec.export_asciinema(&PathBuf::from(path)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn recording_search(
+    state: tauri::State<'_, TauriRecorder>,
+    pattern: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rec = state.lock().unwrap_or_else(|e| e.into_inner());
+    let results: Vec<serde_json::Value> = rec.search(&pattern)
+        .into_iter()
+        .map(|(idx, event)| {
+            serde_json::json!({
+                "index": idx,
+                "time": event.time,
+                "type": event.event_type,
+                "data": event.data,
+            })
+        })
+        .collect();
+    Ok(results)
 }

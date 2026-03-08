@@ -373,6 +373,16 @@ async function handleTripleClick(e: MouseEvent): Promise<void> {
   }
 }
 
+/** Announce a message to screen readers via the sr-announcer live region. */
+function announceToScreenReader(message: string): void {
+  const el = document.getElementById("sr-announcer");
+  if (el) {
+    el.textContent = message;
+    // Clear after a short delay so repeated identical announcements work
+    setTimeout(() => { el.textContent = ""; }, 1000);
+  }
+}
+
 /** Decode a BusEvent payload (byte array) to a parsed object. */
 function decodePayload<T>(event: BusEvent): T | null {
   try {
@@ -453,6 +463,7 @@ function handleEvent(event: BusEvent): void {
       const p = decodePayload<PanePayload>(event);
       if (p) {
         tabBar.addTab(p.pane_id, `shell ${++tabCounter}`);
+        announceToScreenReader(`New terminal tab ${tabCounter} opened`);
       }
       break;
     }
@@ -460,6 +471,7 @@ function handleEvent(event: BusEvent): void {
       const p = decodePayload<PanePayload>(event);
       if (p) {
         tabBar.removeTab(p.pane_id);
+        announceToScreenReader("Terminal tab closed");
       }
       break;
     }
@@ -479,6 +491,7 @@ function handleEvent(event: BusEvent): void {
     }
     case EventType.ShellCommandFinished: {
       statusBar.clearCommand();
+      announceToScreenReader("Command finished");
       break;
     }
     case EventType.GridResized: {
